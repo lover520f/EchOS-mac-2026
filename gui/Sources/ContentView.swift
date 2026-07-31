@@ -17,8 +17,8 @@ struct ContentView: View {
     @State private var showSaveResult = false
     @State private var saveResultOK = false
     @State private var saveResultText = ""
-    /// 上一次自动算出的高度，用来做增量调整
-    @State private var lastAutoHeight: CGFloat = 0
+    /// 发现新版本提示
+    @State private var showUpdateAlert = false
 
     private let labelWidth: CGFloat = 82
 
@@ -33,9 +33,10 @@ struct ContentView: View {
                 titleBar
                     .padding(.horizontal, 16)
 
-                // 配置区按内容自然排布。规则列表已经自己限高了，
-                // 整块的最大高度是可预测的，不需要再套一层滚动。
-                VStack(alignment: .leading, spacing: 10) {
+                // 配置区按内容自然排布，不用滚动条。窗口最小高度由
+                // syncWindowHeight 跟着内容一起定，拉到下限就停，
+                // 底部操作行和日志永远不会被窗口底边盖住。
+                VStack(alignment: .leading, spacing: 12) {
                     serverGroup
                     coreGroup
                     optionalGroup
@@ -45,24 +46,26 @@ struct ContentView: View {
                 // 固定间隔，不参与空间分配
                 Color.clear.frame(height: 10)
 
+                // 底部固定区。日志区弹性高度：窗口被拉高时它跟着变高
+                // （多几行日志），缩回时不低于最少 4 行。底部边距固定。
                 VStack(alignment: .leading, spacing: 10) {
                     actionRow
-                    // 日志吃掉窗口拉伸多出来的高度：这里是唯一该变高的地方，
-                    // 其余控件都是固定尺寸的，撑大它们没有意义
-                    logSection(height: nil)
+                    logSection()
                 }
                 .frame(maxHeight: .infinity, alignment: .top)
                 .padding(.horizontal, 16)
-                .padding(.bottom, 26)
+                .padding(.bottom, 10)
             }
+            // 高度跟窗口走：窗口高度由 syncWindowHeight 按内容精确设定，
+            // 日志区是弹性块，吃掉窗口比内容多的那点余量，永远贴底
             .frame(width: geo.size.width, height: geo.size.height, alignment: .top)
         }
-        .frame(minWidth: 720, minHeight: 762)
+        .frame(minWidth: 723, minHeight: 620)
         .onAppear {
-            // 全新安装（还没有配置文件）：直接建一个待起名的服务器并弹命名框，
-            // 不显示「还没有服务器」空态 —— 第一次操作就是给服务器起名字。
-            if app.config.servers.isEmpty,
-               !FileManager.default.fileExists(atPath: AppConfig.fileURL.path) {
+            // 服务器列表为空（全新安装，或配置文件里没有服务器）：直接建一个
+            // 待起名的服务器并弹命名框，不显示「还没有服务器」空态 ——
+            // 第一次操作就是给服务器起名字。
+            if app.config.servers.isEmpty {
                 app.addServer()
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { syncWindowHeight() }
@@ -76,11 +79,14 @@ struct ContentView: View {
                 renaming = true
             }
         }
+        .onChange(of: app.updateInfo?.id) { id in
+            if id != nil { showUpdateAlert = true }
+        }
         .alert(
             (app.selected?.name.isEmpty ?? true) ? "新建服务器名称" : "重命名服务器",
             isPresented: $renaming
         ) {
-            TextField("例如：家庭主路由", text: $renameText)
+            TextField("例如：xx服务器", text: $renameText)
             Button("取消", role: .cancel) {}
             Button("确定") {
                 if let err = app.rename(to: renameText) {
@@ -116,33 +122,75 @@ struct ContentView: View {
         } message: {
             Text(saveResultText)
         }
+        .alert("发现新版本 \(app.updateInfo?.tag ?? "")", isPresented: $showUpdateAlert) {
+            Button("以后再说", role: .cancel) { app.updateInfo = nil }
+            Button("下载并更新") { app.downloadUpdate() }
+        } message: {
+            Text("当前版本 \(Updater.localVersion)。\n新版将下载到「下载」文件夹并自动挂载，替换后重新打开即可。")
+        }
+        // 手动检查更新的结果（已是最新 / 检查失败）：用弹窗显示，不只在日志里
+        .alert("检查更新", isPresented: Binding(
+            get: { app.updateCheckMessage != nil },
+            set: { if !$0 { app.updateCheckMessage = nil } }
+        )) {
+            Button("好", role: .cancel) { app.updateCheckMessage = nil }
+        } message: {
+            Text(app.updateCheckMessage ?? "")
+        }
+        // 启动失败等错误：窗口可能关着，必须弹窗
+        .alert("出错", isPresented: Binding(
+            get: { app.alertMessage != nil },
+            set: { if !$0 { app.alertMessage = nil } }
+        )) {
+            Button("好", role: .cancel) { app.alertMessage = nil }
+        } message: {
+            Text(app.alertMessage ?? "")
+        }
     }
 
     private let titleBarHeight: CGFloat = 56
 
     /// 把窗口高度调到刚好装下当前内容。
     ///
-    /// 规则区一展开内容就多出百来像素：窗口不动的话，要么下面留一大片空白
-    /// （按最大高度定），要么内容被截断得滚动（按最小高度定）。
-    /// 让窗口跟着内容走，两种难看的情况都不会出现。
+    /// 数字是"按内容拼出来"的：规则收起是一个基准高度；
+    /// 展开后规则列表每加一条多一行的位置，超过 3 条列表不再变高、
+    /// 只多一条搜索框。日志区是弹性块，窗口比内容多的那点余量
+    /// 全给它，所以底部边距固定，不会上漂也不会和页面底边重叠。
+    /// 上一次程序把窗口高度设成的值。用来区分「用户手动拉高」和
+    /// 「程序因为内容变化而长高」：窗口比 lastSetHeight 还高，就说明
+    /// 是用户手动拉的，尊重它，不去缩回。
+    @State private var lastSetHeight: CGFloat = 0
+
     private func syncWindowHeight() {
         let ruleCount = app.selected?.customRules.count ?? 0
-        // 基准值把底部内边距一起算进去 —— 之前少算了这 16px，
-        // 日志框的下边框正好压在窗口底边上，看着就像和底栏重叠了
-        var h: CGFloat = 762          // 规则收起时的基准高度
+        var h: CGFloat = 758          // 基准：规则收起时窗口 frame 高度（日志区约 5 行）
         if rulesExpanded {
-            h += 46                   // 规则区标题 + 底部状态行
-            h += min(CGFloat(ruleCount), 3) * 33   // 最多算 3 行，再多是内部滚动
+            h += 46                   // 展开区：标题行间隔 + 底部状态行
+            h += min(CGFloat(ruleCount), 3) * 33   // 规则行，最多 3 行
+            if ruleCount > 3 { h += 16 }           // 超过 3 条才出现的搜索框
         }
 
         DispatchQueue.main.async {
             guard let win = NSApp.windows.first(where: { $0.contentView != nil }) else { return }
+            // 最小高度跟内容走：手动把窗口拖矮到当前内容所需高度就停，
+            // 操作行和日志永远不会被窗口底边盖住。
+            AppDelegate.minContentHeight = h
+            win.minSize = NSSize(width: 723, height: h)
             let current = win.frame.size.height
-            guard abs(current - h) > 8 else { return }   // 差不多就别动，免得窗口抖
+
+            // 用户手动拉高过窗口（比上次程序设定的还高），保持原样，
+            // 只更新最小高度。这样手动拉伸的高度不会被内容变化顶回去。
+            if lastSetHeight > 0 && current > lastSetHeight + 4 { return }
+
+            // 首次：直接设准；之后内容需要的比现在高就长高，比现在矮就缩回。
+            if lastSetHeight > 0 && abs(current - h) <= 4 { return }
             var f = win.frame
             f.origin.y += (f.size.height - h)            // 顶边不动，往下长
             f.size.height = h
-            win.setFrame(f, display: true, animate: true)
+            // 不用动画：加高是跟内容走的，动画过程里内容已经长出来，
+            // 拖着的过渡反而会把日志区压扁，看着像和底部重叠
+            win.setFrame(f, display: true, animate: false)
+            lastSetHeight = h
         }
     }
 
@@ -190,11 +238,11 @@ struct ContentView: View {
                     LinearGradient(colors: [Color.cloudflareOrange, Color.cloudflareOrange.opacity(0.7)],
                                    startPoint: .top, endPoint: .bottom))
             Text("EchOS")
-                .font(.system(size: 26, weight: .semibold, design: .rounded))
+                .font(.system(size: 24, weight: .semibold, design: .rounded))
             Spacer()
         }
-        .padding(.top, 6)
-        .padding(.bottom, 38)
+        .padding(.top, 10)
+        .padding(.bottom, 14)
     }
 
     // MARK: - 服务器管理
@@ -268,7 +316,7 @@ struct ContentView: View {
 
     private var coreGroup: some View {
         group("核心配置", icon: "gearshape.fill", tint: .indigo) {
-            VStack(spacing: 9) {
+            VStack(spacing: 8) {
                 hostPortRow("服务地址:", host: binding(\.server), port: intBinding(\.serverPort),
                             hostPlaceholder: "xxx.workers.dev")
                 hostPortRow("监听地址:", host: binding(\.listen), port: intBinding(\.listenPort),
@@ -295,15 +343,13 @@ struct ContentView: View {
 
     private var optionalGroup: some View {
         group("高级选项", icon: "slider.horizontal.3", tint: .orange) {
-            VStack(spacing: 9) {
+            VStack(spacing: 8) {
                 row("TOKEN(可选):", binding(\.token), placeholder: "")
                 row("优选IP(域名):", binding(\.ip), placeholder: "104.16.158.132")
                 presetRow("ECH域名:", binding(\.ech), options: EchPresets.echDomains,
-                          placeholder: "cloudflare-ech.com",
-                          help: "去哪个域名查 ECH 公钥。注意这不是伪装域名 —— Cloudflare 的 ECH 域名固定是 cloudflare-ech.com。")
+                          placeholder: "cloudflare-ech.com")
                 presetRow("DOH服务器:", binding(\.dns), options: EchPresets.dnsServers,
-                          placeholder: "dns.alidns.com/dns-query",
-                          help: "用来查询 ECH 公钥的 DNS。必须支持 HTTPS 记录查询。")
+                          placeholder: "dns.alidns.com/dns-query")
 
                 Divider().padding(.vertical, 2)
                 customRulesSection
@@ -365,8 +411,10 @@ struct ContentView: View {
                         .padding(.vertical, 2)
                     }
                     // 高度跟着条数走，最多 3 行；再多就在列表内部滚动，
-                    // 不去牵动整页布局 —— 规则区涨一点整页就得重排是很别扭的
+                    // 不去牵动整页布局。clipped 保证第 4 条完全不可见，
+                    // 不会露出半截在那。
                     .frame(height: min(CGFloat(filtered.count), 3) * 33 + 4)
+                    .clipped()
                 }
 
                 if !ruleSearch.isEmpty && filtered.isEmpty {
@@ -589,7 +637,7 @@ struct ContentView: View {
 
     // MARK: - 运行日志
 
-    private func logSection(height: CGFloat?) -> some View {
+    private func logSection() -> some View {
         VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 10) {
                 Button {
@@ -660,10 +708,10 @@ struct ContentView: View {
                     }
                 }
                 .frostedCard()
-                // 给了具体高度就用它；给 nil 表示"占满剩余"。
-                // 现在配置区是按内容自然排布的，日志吃剩余空间不会再挤到它 ——
-                // 早先那次日志涨到 280px 是因为当时配置区套着 ScrollView 在跟它抢空间。
-                .frame(minHeight: 84, maxHeight: height ?? .infinity)
+                // 弹性高度：默认 4 行，窗口被手动拉高时跟着变高。
+                // 窗口高度是按内容精确算的，所以它平时就停在最少 4 行；
+                // 用户手动把窗口拉高时，多的空间全给日志区。
+                .frame(minHeight: 60, maxHeight: .infinity)
             }
         }
     }
@@ -674,21 +722,21 @@ struct ContentView: View {
     @ViewBuilder
     private func group<C: View>(_ title: String, icon: String, tint: Color,
                                 @ViewBuilder content: () -> C) -> some View {
-        VStack(alignment: .leading, spacing: 7) {
+        VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
                 Image(systemName: icon)
-                    .font(.system(size: 12.5, weight: .semibold))
+                    .font(.system(size: 12, weight: .semibold))
                 Text(title)
-                    .font(.system(size: 14.5, weight: .semibold))
+                    .font(.system(size: 14, weight: .semibold))
             }
             .foregroundColor(.white)
             .padding(.horizontal, 11)
-            .padding(.vertical, 6)
+            .padding(.vertical, 5)
             .background(tint)
             .clipShape(RoundedRectangle(cornerRadius: 7))
 
             content()
-                .padding(10)
+                .padding(8)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .frostedCard()
         }
@@ -704,7 +752,7 @@ struct ContentView: View {
             TextField(placeholder, text: text)
                 .textFieldStyle(.roundedBorder)
                 .font(.system(size: 12.5, design: .monospaced))
-                .frame(height: 25)
+                .frame(height: 24)
         }
     }
 
@@ -735,14 +783,14 @@ struct ContentView: View {
             TextField(hostPlaceholder, text: host)
                 .textFieldStyle(.roundedBorder)
                 .font(.system(size: 12.5, design: .monospaced))
-                .frame(maxWidth: .infinity, minHeight: 25, maxHeight: 25)
+                .frame(maxWidth: .infinity, minHeight: 24, maxHeight: 24)
             Text("端口：")
                 .font(.system(size: 12))
                 .foregroundColor(.secondary)
             TextField("", value: port, format: .number.grouping(.never))
                 .textFieldStyle(.roundedBorder)
                 .font(.system(size: 12.5, design: .monospaced))
-                .frame(width: 96, height: 25)
+                .frame(width: 96, height: 24)
                 .multilineTextAlignment(.center)
         }
     }
@@ -753,8 +801,7 @@ struct ContentView: View {
     /// 就得先切到自定义再重新输入一遍。
     @ViewBuilder
     private func presetRow(_ label: String, _ text: Binding<String>,
-                           options: [PresetOption], placeholder: String,
-                           help: String) -> some View {
+                           options: [PresetOption], placeholder: String) -> some View {
         HStack(spacing: 8) {
             Text(label)
                 .font(.system(size: 12.5))
@@ -777,11 +824,6 @@ struct ContentView: View {
             .menuIndicator(.hidden)
             .frame(width: 22)
             .help("从常用列表里挑一个填进去，填完照样能改")
-
-            Image(systemName: "questionmark.circle")
-                .font(.system(size: 11))
-                .foregroundColor(.secondary.opacity(0.5))
-                .help(help)
         }
     }
 

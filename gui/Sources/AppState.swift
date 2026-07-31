@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import AppKit
 
 @MainActor
 final class AppState: ObservableObject {
@@ -20,6 +21,24 @@ final class AppState: ObservableObject {
     /// 未提交的服务器只在内存里存活（可编辑、可切换），退出重开后消失。
     private var committedIDs: Set<UUID> = []
     @Published var proxyTakenOver = SystemProxy.isActive
+
+    // MARK: - 更新相关状态
+    /// 发现了比本地更新的版本（有值即弹更新提示）
+    @Published var updateInfo: Updater.ReleaseInfo?
+    /// 检查/下载更新的进度文案（"正在检查…""正在下载 45%…""已是最新"）
+    @Published var updateStatus: String = ""
+    /// 手动检查更新的结果弹窗文案（nil = 不弹）。
+    /// 发现新版本走 updateInfo 弹窗，这里只放「已是最新 / 检查失败」这类结果
+    @Published var updateCheckMessage: String?
+    /// 需要弹窗提示的错误（nil = 不弹）。
+    /// 菜单栏触发启动失败时窗口可能关着，日志看不到，必须弹窗
+    @Published var alertMessage: String?
+    /// DMG 下载进度 0~1；nil = 没有在下载
+    @Published var downloadProgress: Double?
+    /// 正在下载分流数据
+    @Published var geoUpdating = false
+    /// 分流数据状态文案（版本 + 更新时间）
+    @Published var geoStatus: String = ""
 
     private var process: Process?
     private var stdoutPipe: Pipe?
@@ -280,6 +299,13 @@ final class AppState: ObservableObject {
 
     // MARK: - 日志
 
+    /// 写日志的同时弹窗提示。启动失败这类错误窗口可能关着，
+    /// 只看日志用户根本发现不了，必须弹窗。
+    func notify(_ text: String) {
+        log("[系统] \(text)")
+        alertMessage = text
+    }
+
     func log(_ text: String) {
         // 级别选「关闭」就是真的什么都不记：界面不显示，文件也不写。
         // 代价是出问题时没有记录可查，但这是用户明确要的行为 ——
@@ -339,10 +365,10 @@ final class AppState: ObservableObject {
 
     func start() {
         guard !isRunning && !isStarting else { return }
-        guard let cfg = selected else { log("[系统] 请先新增一个服务器"); return }
-        if let err = cfg.validate() { log("[系统] \(err)"); return }
+        guard let cfg = selected else { notify("请先新增一个服务器"); return }
+        if let err = cfg.validate() { notify(err); return }
         guard let kernel = kernelPath() else {
-            log("[系统] 找不到内核程序 x-tunnel，请确认 App 完整"); return
+            notify("找不到内核程序 x-tunnel，请确认 App 完整"); return
         }
 
         // 监听地址由主机名 + 端口拼出来，两个字段在界面上是分开填的
@@ -367,7 +393,7 @@ final class AppState: ObservableObject {
             }
             if !free {
                 if let who = PortPicker.occupant(of: s.port) {
-                    log("[系统] \(label) 端口 \(s.port) 被 \(who) 占用，请关掉它或改用别的监听端口")
+                    notify("\(label) 端口 \(s.port) 被 \(who) 占用，请关掉它或改用别的监听端口")
                     return
                 }
                 log("[系统] \(label) 端口 \(s.port) 预检查未通过（\(PortPicker.lastBindReason)），但没有进程在监听，继续启动")
@@ -376,16 +402,17 @@ final class AppState: ObservableObject {
         activeSocks = ServerConfig.socksEndpoint(in: listen)
         activeHTTP = ServerConfig.httpEndpoint(in: listen)
 
-        // 分流数据随 App 打包，规则模式下才需要
+        // 分流数据：优先用更新下载到数据目录的新版，没有再退回 App 内置
         var geoip: String?, geosite: String?
         if cfg.routeMode.needsGeoData {
-            geoip = Bundle.main.path(forResource: "geoip", ofType: "dat")
-            geosite = Bundle.main.path(forResource: "geosite", ofType: "dat")
+            geoip = Updater.geoDataPath(for: "geoip.dat")
+                ?? Bundle.main.path(forResource: "geoip", ofType: "dat")
+            geosite = Updater.geoDataPath(for: "geosite.dat")
+                ?? Bundle.main.path(forResource: "geosite", ofType: "dat")
             if geoip == nil || geosite == nil {
                 // 这不是"降级运行"就能糊弄过去的事：少了数据，"跳过中国大陆"
                 // 会退化成把国内流量也塞进隧道，用户只会觉得又慢又不通。
-                log("[分流] 错误：App 内缺少分流数据文件（geoip.dat / geosite.dat）")
-                log("[分流] 请改用「全局代理」模式，或重新安装完整版本")
+                notify("App 内缺少分流数据文件（geoip.dat / geosite.dat），请改用「全局代理」模式或重新安装完整版本")
                 return
             }
         }
@@ -427,7 +454,7 @@ final class AppState: ObservableObject {
         } catch {
             isStarting = false
             checkState = .idle
-            log("[系统] 启动内核失败：\(error.localizedDescription)")
+            notify("启动内核失败：\(error.localizedDescription)")
             return
         }
         process = p
@@ -692,5 +719,120 @@ final class AppState: ObservableObject {
             persist()
         }
         LogFile.close()
+    }
+
+    // MARK: - 更新
+
+    /// 启动时调用：后台检查 App 新版本 + 分流数据，都不阻塞启动。
+    /// 延后几秒再查，先把窗口和菜单栏准备好，网络慢也不影响首屏。
+    func checkForUpdatesAtStartup() {
+        refreshGeoStatus()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+            self?.checkEverything(silent: true)
+        }
+    }
+
+    /// 菜单栏「检查更新」：软件版本 + 分流数据一起查。
+    /// silent = 启动时的静默检查（geo 更新不打断，只写日志）。
+    func checkEverything(silent: Bool = false) {
+        checkAppUpdate(silent: silent)
+        updateGeoData(force: false, silent: silent)
+    }
+
+    /// 检查 App 是否有新版本（手动/启动共用）。completion 在结果确定后主线程回调。
+    /// 手动检查（silent = false）结果用弹窗显示，不只在日志里憋着。
+    func checkAppUpdate(silent: Bool, completion: (() -> Void)? = nil) {
+        guard !Updater.repo.isEmpty else {
+            updateStatus = "未配置更新源，无法检查更新"
+            if !silent { updateCheckMessage = "未配置更新源，无法检查更新" }
+            completion?()
+            return
+        }
+        log("[更新] 正在检查新版本…")
+        Updater.fetchLatestRelease { [weak self] info in
+            guard let self else { completion?(); return }
+            guard let info else {
+                self.updateStatus = "检查失败（网络或 GitHub 不可达）"
+                self.log("[更新] 检查失败：网络或 GitHub 不可达")
+                if !silent { self.updateCheckMessage = "检查更新失败（网络或 GitHub 不可达）" }
+                completion?()
+                return
+            }
+            let local = Updater.parseVersion(Updater.localVersion)
+            let remote = Updater.parseVersion(info.version)
+            if Updater.version(remote, isNewerThan: local) {
+                self.updateInfo = info
+                self.updateStatus = "发现新版本 \(info.tag)"
+                self.log("[更新] 发现新版本 \(info.tag)（当前 \(Updater.localVersion)）")
+                self.presentMainWindow()   // 窗口可能关着（菜单栏触发的），调出来才能弹更新提示
+            } else {
+                self.updateStatus = "已是最新版本"
+                self.log("[更新] 已是最新版本（\(Updater.localVersion)）")
+                if !silent { self.updateCheckMessage = "已是最新版本（v\(Updater.localVersion)）" }
+            }
+            completion?()
+        }
+    }
+
+    /// 下载新版 DMG 到 ~/Downloads，完成后自动挂载并打开。
+    func downloadUpdate() {
+        guard let info = updateInfo else { return }
+        downloadProgress = 0
+        updateStatus = "正在下载 \(info.dmgName ?? "新版本")…"
+        log("[更新] 开始下载 \(info.dmgName ?? "")…")
+        Updater.downloadDMG(info) { [weak self] p in
+            self?.downloadProgress = p
+            self?.updateStatus = String(format: "正在下载 %.0f%%…", p * 100)
+        } finish: { [weak self] url in
+            guard let self else { return }
+            self.downloadProgress = nil
+            if let url {
+                self.updateStatus = "下载完成，已挂载 DMG"
+                self.log("[更新] 下载完成：\(url.path)")
+                self.updateInfo = nil
+                NSWorkspace.shared.open(url)   // 挂载并打开，用户拖入 Applications 替换
+                self.log("[更新] 请把新版本 EchOS.app 拖入 Applications 替换旧版，再重新打开")
+            } else {
+                self.updateStatus = "下载失败"
+                self.log("[更新] 下载失败，请稍后重试")
+            }
+        }
+    }
+
+    /// 更新分流数据。silent = 启动时的静默检查（不打断用户，只写日志）。
+    func updateGeoData(force: Bool, silent: Bool = false) {
+        guard !geoUpdating else { return }
+        geoUpdating = true
+        if !silent { log("[更新] 开始更新分流数据…") }
+        Updater.updateGeoData(force: force,
+                              log: { [weak self] text in self?.log(text) }) { [weak self] ok, message in
+            guard let self else { return }
+            self.geoUpdating = false
+            self.log("[更新] \(message)")
+            self.refreshGeoStatus()
+        }
+    }
+
+    /// 刷新界面上"分流数据"行的文案
+    func refreshGeoStatus() {
+        let v = Updater.localGeoVersion()
+        if v.isEmpty {
+            geoStatus = "未更新（使用 App 内置数据）"
+        } else {
+            geoStatus = "数据版本 \(v)（\(Updater.hasLocalGeoData() ? "已下载到本地" : "使用内置数据")）"
+        }
+    }
+
+    /// 把主窗口调出来（菜单栏触发更新检查时窗口可能是关着的）。
+    /// 只在前台模式才切 .regular；后台模式保持 .accessory，否则程序坞图标会
+    /// 被强拉出来（和"在程序坞显示图标"开关对不上）。
+    func presentMainWindow() {
+        if config.showDockIcon {
+            NSApp.setActivationPolicy(.regular)
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        for w in NSApp.windows where w.contentView != nil {
+            w.makeKeyAndOrderFront(nil)
+        }
     }
 }

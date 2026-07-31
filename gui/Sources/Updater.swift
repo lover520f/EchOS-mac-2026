@@ -1,0 +1,278 @@
+import Foundation
+import AppKit
+
+/// 应用内更新，两个独立通道：
+/// 1) App 版本更新 —— 读 GitHub Releases 最新版，发现新版则下载 DMG 到 ~/Downloads 并挂载，用户拖入替换
+/// 2) 分流数据更新 —— geoip.dat / geosite.dat 下载到数据目录，内核启动优先加载数据目录里的新版
+///
+/// 两个通道都只在"有网络"时工作；任何一步失败都静默跳过、不阻塞启动，
+/// 下次启动或手动点击会重试。
+enum Updater {
+
+    /// 更新源（形如 "owner/EchOS"）。
+    /// 从 Info.plist 的 EchOSUpdateRepo 键读取，发布打包时注入 ——
+    /// 源码和界面里都不写死真实仓库地址，反编译也看不到。
+    static var repo: String {
+        (Bundle.main.object(forInfoDictionaryKey: "EchOSUpdateRepo") as? String)?
+            .trimmingCharacters(in: .whitespaces) ?? ""
+    }
+
+    /// 分流数据上游（Loyalsoldier/v2ray-rules-dat，release tag 是日期，如 20250801）
+    static let geoRepo = "Loyalsoldier/v2ray-rules-dat"
+
+    // MARK: - 数据目录
+
+    /// ~/Library/Application Support/EchOS/data/
+    static var dataDir: URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        return base.appendingPathComponent("EchOS/data", isDirectory: true)
+    }
+    static var metaURL: URL   { dataDir.appendingPathComponent("meta.json") }
+    static var geoipURL: URL  { dataDir.appendingPathComponent("geoip.dat") }
+    static var geositeURL: URL{ dataDir.appendingPathComponent("geosite.dat") }
+
+    /// 数据目录里存在的话返回路径，否则 nil（内核退回用 App 内置的）
+    static func geoDataPath(for name: String) -> String? {
+        let p = dataDir.appendingPathComponent(name).path
+        return FileManager.default.fileExists(atPath: p) ? p : nil
+    }
+
+    // MARK: - 版本比较
+
+    struct ReleaseInfo: Identifiable {
+        var id: String { tag }
+        var tag: String          // 例如 "v1.0.2"
+        var version: String      // 例如 "1.0.2"
+        var dmgName: String?
+        var dmgURL: URL?
+        var htmlURL: URL
+    }
+
+    /// 当前 App 版本（Info.plist CFBundleShortVersionString）
+    static var localVersion: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
+    }
+
+    static func parseVersion(_ v: String) -> [Int] {
+        v.trimmingCharacters(in: CharacterSet(charactersIn: "vV "))
+            .split(separator: ".")
+            .compactMap { Int($0) }
+    }
+
+    /// a 是否比 b 新
+    static func version(_ a: [Int], isNewerThan b: [Int]) -> Bool {
+        for i in 0..<max(a.count, b.count) {
+            let x = i < a.count ? a[i] : 0
+            let y = i < b.count ? b[i] : 0
+            if x != y { return x > y }
+        }
+        return false
+    }
+
+    private static func githubRequest(_ url: URL) -> URLRequest {
+        var req = URLRequest(url: url)
+        req.timeoutInterval = 15
+        req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        req.setValue("EchOS/\(localVersion)", forHTTPHeaderField: "User-Agent")
+        return req
+    }
+
+    // MARK: - App 版本检查
+
+    /// 拉取最新 Release。completion 在主线程回调。
+    static func fetchLatestRelease(completion: @escaping (ReleaseInfo?) -> Void) {
+        guard let url = URL(string: "https://api.github.com/repos/\(repo)/releases/latest") else {
+            completion(nil); return
+        }
+        URLSession.shared.dataTask(with: githubRequest(url)) { data, _, _ in
+            guard let data,
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let tag = obj["tag_name"] as? String else {
+                DispatchQueue.main.async { completion(nil) }
+                return
+            }
+            var info = ReleaseInfo(
+                tag: tag,
+                version: tag.trimmingCharacters(in: CharacterSet(charactersIn: "vV ")),
+                dmgName: nil,
+                dmgURL: nil,
+                htmlURL: URL(string: obj["html_url"] as? String ?? "https://github.com/\(repo)")!
+            )
+            if let assets = obj["assets"] as? [[String: Any]] {
+                for a in assets {
+                    guard let name = a["name"] as? String,
+                          name.hasSuffix(".dmg"),
+                          let u = a["browser_download_url"] as? String else { continue }
+                    info.dmgName = name
+                    info.dmgURL = URL(string: u)
+                    break
+                }
+            }
+            DispatchQueue.main.async { completion(info) }
+        }.resume()
+    }
+
+    /// 下载 DMG 到 ~/Downloads。progress 0~1、finish(destURL) 都在主线程回调。
+    static func downloadDMG(_ info: ReleaseInfo,
+                            progress: @escaping (Double) -> Void,
+                            finish: @escaping (URL?) -> Void) {
+        guard let dmgURL = info.dmgURL else { finish(nil); return }
+        let dest = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first!
+            .appendingPathComponent(info.dmgName ?? "EchOS-mac-\(info.version)-universal-x64.dmg")
+        let downloader = DMGDownloader()
+        downloader.start(from: dmgURL, to: dest, progress: progress, finish: finish)
+    }
+
+    // MARK: - 分流数据更新
+
+    struct GeoMeta: Codable {
+        var source = "loyalsoldier"
+        var version = ""
+        var updatedAt = ""
+    }
+
+    static func localGeoVersion() -> String {
+        guard let data = try? Data(contentsOf: metaURL),
+              let meta = try? JSONDecoder().decode(GeoMeta.self, from: data) else { return "" }
+        return meta.version
+    }
+
+    static func hasLocalGeoData() -> Bool {
+        FileManager.default.fileExists(atPath: geoipURL.path)
+            && FileManager.default.fileExists(atPath: geositeURL.path)
+    }
+
+    /// 检查并更新分流数据。
+    /// - Parameters:
+    ///   - force: true = 强制重新下载；false = 版本相同且文件在则跳过
+    ///   - log: 进度输出（AppState.log，主线程）
+    ///   - completion: (ok, message) 主线程回调
+    static func updateGeoData(force: Bool,
+                              log: @escaping (String) -> Void,
+                              completion: @escaping (Bool, String) -> Void) {
+        log("[更新] 正在检查分流数据版本…")
+        guard let url = URL(string: "https://api.github.com/repos/\(geoRepo)/releases/latest") else {
+            completion(false, "地址无效"); return
+        }
+        URLSession.shared.dataTask(with: githubRequest(url)) { data, _, _ in
+            guard let data,
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let tag = obj["tag_name"] as? String else {
+                DispatchQueue.main.async { completion(false, "检查失败（网络不通或 GitHub 不可达）") }
+                return
+            }
+            let current = localGeoVersion()
+            if !force, current == tag, hasLocalGeoData() {
+                DispatchQueue.main.async { completion(true, "已是最新（\(tag)）") }
+                return
+            }
+            log("[更新] 上游最新 \(tag)（本地 \(current.isEmpty ? "无" : current)），开始下载…")
+            downloadGeoFiles(tag: tag, log: log) { ok in
+                if ok {
+                    let meta = GeoMeta(version: tag, updatedAt: ISO8601DateFormatter().string(from: Date()))
+                    if let data = try? JSONEncoder().encode(meta) {
+                        try? FileManager.default.createDirectory(at: dataDir, withIntermediateDirectories: true)
+                        try? data.write(to: metaURL, options: .atomic)
+                    }
+                    DispatchQueue.main.async { completion(true, "分流数据已更新到 \(tag)") }
+                } else {
+                    DispatchQueue.main.async { completion(false, "下载失败，已保留原有数据") }
+                }
+            }
+        }.resume()
+    }
+
+    private static func downloadGeoFiles(tag: String,
+                                         log: @escaping (String) -> Void,
+                                         done: @escaping (Bool) -> Void) {
+        try? FileManager.default.createDirectory(at: dataDir, withIntermediateDirectories: true)
+        let base = "https://github.com/\(geoRepo)/releases/download/\(tag)"
+        let group = DispatchGroup()
+        var allOK = true
+        for name in ["geoip.dat", "geosite.dat"] {
+            group.enter()
+            let dest = dataDir.appendingPathComponent(name)
+            let tmp = dataDir.appendingPathComponent(".\(name).tmp")
+            guard let url = URL(string: "\(base)/\(name)") else { group.leave(); continue }
+            var req = URLRequest(url: url)
+            req.timeoutInterval = 120
+            URLSession.shared.downloadTask(with: req) { location, _, error in
+                defer { group.leave() }
+                guard let location, error == nil else { allOK = false; return }
+                let size = (try? FileManager.default.attributesOfItem(atPath: location.path)[.size]) as? Int ?? 0
+                guard size > 100_000 else { allOK = false; return }  // 拦截空文件/错误页
+                try? FileManager.default.removeItem(at: tmp)
+                do {
+                    try FileManager.default.moveItem(at: location, to: tmp)
+                    if FileManager.default.fileExists(atPath: dest.path) {
+                        _ = try FileManager.default.replaceItemAt(dest, withItemAt: tmp)
+                    } else {
+                        try FileManager.default.moveItem(at: tmp, to: dest)
+                    }
+                } catch {
+                    allOK = false
+                }
+            }.resume()
+        }
+        group.notify(queue: .main) {
+            log("[更新] geoip/geosite 下载完成（\(allOK ? "成功" : "失败")）")
+            done(allOK)
+        }
+    }
+}
+
+/// DMG 下载器（URLSessionDownloadDelegate，带进度回调）
+final class DMGDownloader: NSObject, URLSessionDownloadDelegate {
+    private var session: URLSession?
+    private var task: URLSessionDownloadTask?
+    private var dest: URL?
+    private var onProgress: ((Double) -> Void)?
+    private var onFinish: ((URL?) -> Void)?
+
+    func start(from url: URL,
+               to dest: URL,
+               progress: @escaping (Double) -> Void,
+               finish: @escaping (URL?) -> Void) {
+        self.dest = dest
+        self.onProgress = progress
+        self.onFinish = finish
+        let cfg = URLSessionConfiguration.default
+        cfg.timeoutIntervalForRequest = 60
+        let session = URLSession(configuration: cfg, delegate: self, delegateQueue: .main)
+        self.session = session
+        self.task = session.downloadTask(with: url)
+        task?.resume()
+    }
+
+    func urlSession(_ session: URLSession,
+                    downloadTask: URLSessionDownloadTask,
+                    didWriteData bytesWritten: Int64,
+                    totalBytesWritten: Int64,
+                    totalBytesExpectedToWrite: Int64) {
+        let p = totalBytesExpectedToWrite > 0
+            ? Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)
+            : 0
+        onProgress?(min(1, max(0, p)))
+    }
+
+    func urlSession(_ session: URLSession,
+                    downloadTask: URLSessionDownloadTask,
+                    didFinishDownloadingTo location: URL) {
+        guard let dest else { onFinish?(nil); return }
+        do {
+            if FileManager.default.fileExists(atPath: dest.path) {
+                try FileManager.default.removeItem(at: dest)
+            }
+            try FileManager.default.moveItem(at: location, to: dest)
+            onFinish?(dest)
+        } catch {
+            onFinish?(nil)
+        }
+    }
+
+    func urlSession(_ session: URLSession,
+                    task: URLSessionTask,
+                    didCompleteWithError error: (any Error)?) {
+        if error != nil { onFinish?(nil) }
+    }
+}

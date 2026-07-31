@@ -5,6 +5,10 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      version:
+        description: '发布版本号，例如 1.0.0（会用 v1.0.0 作为 Release 标签）'
+        required: true
 
 permissions:
   contents: write
@@ -23,11 +27,21 @@ jobs:
           go-version: 'stable'
           cache-dependency-path: core/go.sum
 
-      # 版本号以 Git 标签为准（如 v1.0.1 → 1.0.1），写回 Info.plist，
-      # 这样 DMG 文件名自动是 EchOS-mac-1.0.1-universal-x64.dmg。
-      - name: Set version from tag
+      # 版本号：push 标签时取 GITHUB_REF_NAME（v1.0.0 → 1.0.0）；
+      # 手动触发时取输入框版本号（1.0.0 → 标签 v1.0.0）。
+      # 写回 Info.plist，DMG 文件名自动是 EchOS-mac-1.0.0-universal-x64.dmg。
+      - name: Resolve version
+        id: ver
         run: |
-          VER="${GITHUB_REF_NAME#v}"
+          if [ "${{ github.event_name }}" = "push" ]; then
+            TAG="${GITHUB_REF_NAME}"
+            VER="${GITHUB_REF_NAME#v}"
+          else
+            TAG="v${{ github.event.inputs.version }}"
+            VER="${{ github.event.inputs.version }}"
+          fi
+          echo "TAG=$TAG" >> "$GITHUB_OUTPUT"
+          echo "VER=$VER" >> "$GITHUB_OUTPUT"
           echo "Building version: $VER"
           /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VER" gui/Info.plist
           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VER" gui/Info.plist
@@ -37,6 +51,9 @@ jobs:
         run: ./fetch-geodata.sh
 
       - name: Build app
+        # ECH_UPDATE_REPO 注入构建产物，DMG 里「检查更新」才能指向本仓库的 Releases
+        env:
+          ECH_UPDATE_REPO: ${{ github.repository }}
         run: ./build.sh
 
       - name: Package DMG
@@ -51,7 +68,7 @@ jobs:
       # Release 发布后直接到网页上编辑正文。
       - name: Generate release notes
         run: |
-          TAG="${GITHUB_REF_NAME}"
+          TAG="${{ steps.ver.outputs.TAG }}"
           NOTES=""
           if [ -f CHANGELOG.md ]; then
             # 提取 "## v1.0.1"（或 "## 1.0.1"）段落，直到下一个 "## " 为止
@@ -87,8 +104,10 @@ jobs:
       - name: Create release & upload DMG
         # 由标签触发；GitHub 会自动给每个 Release 附上
         # "Source code (zip)" 和 "Source code (tar.gz)"
+        # 手动触发时 tag_name 用输入框版本号拼成的标签（不存在会自动创建）
         uses: softprops/action-gh-release@v2
         with:
-          name: EchOS ${{ github.ref_name }}
+          tag_name: ${{ steps.ver.outputs.TAG }}
+          name: EchOS ${{ steps.ver.outputs.TAG }}
           body_path: RELEASE_BODY.md
           files: build/EchOS-mac-*.dmg

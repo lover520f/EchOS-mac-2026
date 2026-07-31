@@ -91,7 +91,6 @@ final class StatusBarController: NSObject, NSMenuDelegate {
 
         menu.addItem(.separator())
 
-        add(menu, "显示应用", #selector(showApp))
         add(menu, running ? "关闭 ECH 代理" : "开启 ECH 代理", #selector(toggleProxy))
 
         // 选择服务器
@@ -112,6 +111,13 @@ final class StatusBarController: NSObject, NSMenuDelegate {
 
         menu.addItem(.separator())
 
+        add(menu, "检查更新…", #selector(checkUpdate))
+
+        menu.addItem(.separator())
+
+        // 显示应用在前，程序坞图标在后（用户指定的顺序）
+        add(menu, "显示应用", #selector(showApp))
+
         let dock = NSMenuItem(title: "在程序坞显示图标",
                               action: #selector(toggleDockIcon), keyEquivalent: "")
         dock.target = self
@@ -119,7 +125,6 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         dock.state = state.config.showDockIcon ? .on : .off
         menu.addItem(dock)
 
-        menu.addItem(.separator())
         add(menu, "退出应用", #selector(quitApp))
     }
 
@@ -130,7 +135,10 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     }
 
     @objc private func showApp() {
-        NSApp.setActivationPolicy(.regular)
+        // 后台模式保持 .accessory，别把程序坞图标强拉出来
+        if state?.config.showDockIcon == true {
+            NSApp.setActivationPolicy(.regular)
+        }
         NSApp.activate(ignoringOtherApps: true)
         for w in NSApp.windows where w.contentView != nil {
             w.makeKeyAndOrderFront(nil)
@@ -153,6 +161,11 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     @objc private func pickServer(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? UUID else { return }
         state?.select(id)
+    }
+
+    /// 菜单栏的「检查更新」：同时检查软件新版本和分流数据
+    @objc private func checkUpdate() {
+        state?.checkEverything()
     }
 
     @objc private func quitApp() {

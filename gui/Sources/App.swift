@@ -14,9 +14,10 @@ struct ECHApp: App {
                     delegate.state = app
                     app.applyDockIconPolicy()
                     app.flushPendingLogs()
+                    app.checkForUpdatesAtStartup()
                 }
         }
-        .defaultSize(width: 790, height: 910)
+        .defaultSize(width: 723, height: 758)
         .commands {
             CommandGroup(replacing: .newItem) {}
         }
@@ -24,7 +25,7 @@ struct ECHApp: App {
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var state: AppState? {
         didSet {
             guard let state, !statusBarInstalled else { return }
@@ -38,9 +39,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // 在窗口出现前读取配置，设好激活策略，避免 dock 图标闪一下或关不掉
     func applicationWillFinishLaunching(_ notification: Notification) {
         let cfg = AppConfig.load()
-        if !cfg.showDockIcon {
-            NSApp.setActivationPolicy(.accessory)
-        }
+        NSApp.setActivationPolicy(cfg.showDockIcon ? .regular : .accessory)
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -51,14 +50,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let win = NSApp.windows.first(where: { $0.contentView != nil }) else { return }
             // 只定宽度和最小尺寸；高度交给 ContentView 的 syncWindowHeight
             // 按当前内容算，免得两处各设一套值互相覆盖
-            win.setContentSize(NSSize(width: 790, height: 762))
-            win.minSize = NSSize(width: 720, height: 762)
+            win.setContentSize(NSSize(width: 723, height: 774))
+            // minSize 只挡"窗口被拖得太小"：拉到 758（规则收起时内容所需高度）
+            // 就停，底部操作行和日志不会被窗口底边盖住
+            win.minSize = NSSize(width: 723, height: 758)
+            win.delegate = self
             win.center()
             win.makeKeyAndOrderFront(nil)
             // 内容区顶部已经有居中的 EchOS 标题，标题栏再显示一次就重复了
             win.titleVisibility = .hidden
             win.titlebarAppearsTransparent = true
         }
+    }
+
+    /// ContentView 算出的内容所需高度。窗口手动缩放时不能比它矮，
+    /// 否则底部操作行和日志会被窗口底边盖住。
+    static var minContentHeight: CGFloat = 758
+
+    // 拖拽窗口时强制高度不能低于内容所需高度（minSize 之外的兜底）
+    @objc func windowWillResize(_ sender: NSWindow, to frameSize: NSSize) -> NSSize {
+        let floor = max(Self.minContentHeight, sender.minSize.height)
+        guard frameSize.height < floor - 0.5 else { return frameSize }
+        var s = frameSize
+        s.height = floor
+        return s
+    }
+
+    // 移动/缩放窗口时，底边不许越过可见区域底部（否则日志会被 Dock 遮住）
+    @objc func windowDidMove(_ notification: Notification) { clampBottom(notification.object as? NSWindow) }
+    @objc func windowDidResize(_ notification: Notification) { clampBottom(notification.object as? NSWindow) }
+
+    private func clampBottom(_ win: NSWindow?) {
+        guard let win, let screen = win.screen else { return }
+        let minY = screen.visibleFrame.minY
+        guard win.frame.minY < minY - 0.5 else { return }
+        var f = win.frame
+        f.origin.y = minY
+        win.setFrame(f, display: true)
     }
 
     // 关窗口不退出：代理继续在后台跑，靠菜单栏图标控制

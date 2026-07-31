@@ -50,6 +50,14 @@ chmod +x "$APP/Contents/MacOS/EchOS"
 
 echo "==> 3/3 组装 App"
 cp "$ROOT/gui/Info.plist" "$APP/Contents/Info.plist"
+# 更新源仓库（owner/repo）：不写死在源码里，发布时用环境变量注入；
+# 不注入则该键不存在，界面上的「检查更新」会提示未配置，不暴露地址
+if [ -n "${ECH_UPDATE_REPO:-}" ]; then
+  PLIST="$APP/Contents/Info.plist"
+  /usr/libexec/PlistBuddy -c "Delete :EchOSUpdateRepo" "$PLIST" 2>/dev/null || true
+  /usr/libexec/PlistBuddy -c "Add :EchOSUpdateRepo string '$ECH_UPDATE_REPO'" "$PLIST"
+  echo "    更新源已注入：$ECH_UPDATE_REPO"
+fi
 # 分流数据（跳过中国大陆模式要用）
 for d in geoip geosite; do
   if [ -f "$ROOT/assets/$d.dat" ]; then
