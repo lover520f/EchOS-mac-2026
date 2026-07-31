@@ -1,0 +1,75 @@
+#!/bin/bash
+# 一键编译 ECH for Mac：Go 内核 + SwiftUI 界面 → ECH.app
+set -e
+
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+OUT="$ROOT/build"
+APP="$OUT/EchOS.app"
+export PATH="/usr/local/bin:/opt/homebrew/bin:$PATH"
+
+# 通用二进制（Intel + Apple 芯片都能跑），设 UNIVERSAL=0 只编译当前架构
+UNIVERSAL="${UNIVERSAL:-1}"
+MIN_MACOS="13.0"
+
+# rm -rf "$OUT"
+# Cleanup previous build output - commented out to avoid permission issues
+mkdir -p "$OUT"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+# If we need to clean, we should ensure we have write permissions first
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+
+echo "==> 1/3 编译 Go 内核 x-tunnel"
+cd "$ROOT/core"
+if [ "$UNIVERSAL" = "1" ]; then
+  CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o "$OUT/x-tunnel-amd64" .
+  CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags "-s -w" -o "$OUT/x-tunnel-arm64" .
+  lipo -create -output "$APP/Contents/Resources/x-tunnel" "$OUT/x-tunnel-amd64" "$OUT/x-tunnel-arm64"
+  rm -f "$OUT/x-tunnel-amd64" "$OUT/x-tunnel-arm64"
+else
+  CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o "$APP/Contents/Resources/x-tunnel" .
+fi
+chmod +x "$APP/Contents/Resources/x-tunnel"
+
+echo "==> 2/3 编译 SwiftUI 界面"
+cd "$ROOT/gui"
+SRC=(Sources/*.swift)
+SDK="$(xcrun --show-sdk-path)"
+if [ "$UNIVERSAL" = "1" ]; then
+  swiftc -O -sdk "$SDK" -target x86_64-apple-macos$MIN_MACOS \
+      -parse-as-library -o "$OUT/gui-x86_64" "${SRC[@]}"
+  swiftc -O -sdk "$SDK" -target arm64-apple-macos$MIN_MACOS \
+      -parse-as-library -o "$OUT/gui-arm64" "${SRC[@]}"
+  lipo -create -output "$APP/Contents/MacOS/EchOS" "$OUT/gui-x86_64" "$OUT/gui-arm64"
+  rm -f "$OUT/gui-x86_64" "$OUT/gui-arm64"
+else
+  ARCH="$(uname -m)"
+  swiftc -O -sdk "$SDK" -target $ARCH-apple-macos$MIN_MACOS \
+      -parse-as-library -o "$APP/Contents/MacOS/EchOS" "${SRC[@]}"
+fi
+chmod +x "$APP/Contents/MacOS/EchOS"
+
+echo "==> 3/3 组装 App"
+cp "$ROOT/gui/Info.plist" "$APP/Contents/Info.plist"
+# 分流数据（跳过中国大陆模式要用）
+for d in geoip geosite; do
+  if [ -f "$ROOT/assets/$d.dat" ]; then
+    cp "$ROOT/assets/$d.dat" "$APP/Contents/Resources/$d.dat"
+  else
+    echo "    ⚠️  缺少 assets/$d.dat，分流模式将无法工作"
+  fi
+done
+if [ -f "$ROOT/gui/AppIcon.icns" ]; then
+  cp "$ROOT/gui/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
+fi
+# 菜单栏两态图标
+for m in menubar-off menubar-on; do
+  [ -f "$ROOT/assets/menubar/$m.png" ] && cp "$ROOT/assets/menubar/$m.png" "$APP/Contents/Resources/$m.png"
+  [ -f "$ROOT/assets/menubar/$m@2x.png" ] && cp "$ROOT/assets/menubar/$m@2x.png" "$APP/Contents/Resources/$m@2x.png"
+done
+# 本地临时签名：不签名的话 macOS 会直接拒绝运行
+codesign --force --deep --sign - "$APP" 2>/dev/null || echo "    （签名跳过，不影响本机使用）"
+
+echo ""
+echo "完成：$APP"
+lipo -info "$APP/Contents/MacOS/EchOS" 2>/dev/null || true
+lipo -info "$APP/Contents/Resources/x-tunnel" 2>/dev/null || true

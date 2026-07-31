@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0.15" y1="0" x2="0.85" y2="1">
+      <stop offset="0" stop-color="#FFB454"/><stop offset="0.55" stop-color="#F6821F"/><stop offset="1" stop-color="#D2620A"/>
+    </linearGradient>
+    <filter id="s"><feDropShadow dx="0" dy="9" stdDeviation="14" flood-color="#8A3D00" flood-opacity="0.28"/></filter>
+  </defs>
+  <rect x="0" y="0" width="1024" height="1024" rx="232" fill="url(#bg)"/>
+  <g fill="none" stroke="#ffffff" stroke-linecap="round" stroke-linejoin="round" filter="url(#s)">
+    <!-- 重画的云：三个凸起半径拉开差距（小-大-中），底部更平，整体更舒展 -->
+    <path stroke-width="52" d="
+      M 176 786
+      A 104 104 0 0 1 194 578
+      A 176 176 0 0 1 516 492
+      A 136 136 0 0 1 726 596
+      A 96 96 0 0 1 722 786
+      Z"/>
+    <circle cx="378" cy="678" r="9" stroke-width="58"/>
+    <g stroke-width="44">
+      <path d="M 690 356 A 120 120 0 0 1 810 356" opacity="0.95" transform="rotate(35 750 356)"/>
+      <path d="M 652 268 A 192 192 0 0 1 844 268" opacity="0.5" transform="rotate(35 748 268)"/>
+    </g>
+  </g>
+</svg>

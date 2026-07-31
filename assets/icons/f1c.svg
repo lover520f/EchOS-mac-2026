@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0.15" y1="0" x2="0.85" y2="1">
+      <stop offset="0" stop-color="#FFB454"/><stop offset="0.55" stop-color="#F6821F"/><stop offset="1" stop-color="#D2620A"/>
+    </linearGradient>
+    <filter id="s"><feDropShadow dx="0" dy="10" stdDeviation="15" flood-color="#8A3D00" flood-opacity="0.28"/></filter>
+  </defs>
+  <rect x="0" y="0" width="1024" height="1024" rx="232" fill="url(#bg)"/>
+  <g fill="none" stroke="#ffffff" stroke-linecap="round" stroke-linejoin="round" filter="url(#s)">
+    <!-- 云再放大：横向铺到 128–872，纵向压到 812，信号相应上移 -->
+    <path stroke-width="58" d="
+      M 128 812
+      A 116 116 0 0 1 148 580
+      A 196 196 0 0 1 506 484
+      A 152 152 0 0 1 740 600
+      A 107 107 0 0 1 736 812
+      Z"/>
+    <circle cx="352" cy="694" r="10" stroke-width="64"/>
+    <g stroke-width="46">
+      <path d="M 712 316 A 124 124 0 0 1 836 316" opacity="0.95" transform="rotate(35 774 316)"/>
+      <path d="M 674 224 A 198 198 0 0 1 872 224" opacity="0.5" transform="rotate(35 773 224)"/>
+    </g>
+  </g>
+</svg>

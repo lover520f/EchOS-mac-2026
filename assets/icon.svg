@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <!-- 渐变起点加深：原来左上角太浅，在浅色壁纸上看着像没填色 -->
+    <linearGradient id="bg" x1="0.1" y1="0" x2="0.9" y2="1">
+      <stop offset="0" stop-color="#FFA337"/><stop offset="0.5" stop-color="#F6821F"/><stop offset="1" stop-color="#C25E08"/>
+    </linearGradient>
+    <filter id="s"><feDropShadow dx="0" dy="9" stdDeviation="14" flood-color="#8A3D00" flood-opacity="0.26"/></filter>
+  </defs>
+  <rect x="0" y="0" width="1024" height="1024" rx="232" fill="url(#bg)"/>
+  <g fill="none" stroke="#ffffff" stroke-linecap="round" stroke-linejoin="round" filter="url(#s)">
+    <!-- 云整体右移上移，四周留出足够余量，不再贴着圆角边框 -->
+    <path stroke-width="54" d="
+      M 214 742
+      A 106 106 0 0 1 232 530
+      A 180 180 0 0 1 560 442
+      A 140 140 0 0 1 774 548
+      A 98 98 0 0 1 770 742
+      Z"/>
+    <circle cx="410" cy="638" r="9" stroke-width="58"/>
+    <g stroke-width="42">
+      <path d="M 706 300 A 112 112 0 0 1 818 300" opacity="0.95" transform="rotate(35 762 300)"/>
+      <path d="M 672 218 A 178 178 0 0 1 850 218" opacity="0.5" transform="rotate(35 761 218)"/>
+    </g>
+  </g>
+</svg>

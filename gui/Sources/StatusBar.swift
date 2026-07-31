@@ -1,0 +1,179 @@
+import AppKit
+import SwiftUI
+import Combine
+
+/// 通知名称扩展
+extension Notification.Name {
+    static let dockIconVisibilityChanged = Notification.Name("dockIconVisibilityChanged")
+}
+
+/// 菜单栏图标 + 菜单。窗口关掉后软件仍在后台跑，靠这里控制。
+@MainActor
+final class StatusBarController: NSObject, NSMenuDelegate {
+    private var statusItem: NSStatusItem?
+    private weak var state: AppState?
+    private var cancellables = Set<AnyCancellable>()
+
+    func install(state: AppState) {
+        self.state = state
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        let menu = NSMenu()
+        menu.delegate = self
+        item.menu = menu
+        statusItem = item
+
+        // 运行状态一变，菜单栏图标跟着变色，不用等用户点开菜单
+        state.$isRunning
+            .receive(on: RunLoop.main)
+            .sink { [weak self] running in self?.applyIcon(running: running) }
+            .store(in: &cancellables)
+
+        // 监听程序坞图标可见性变化，同步菜单勾选状态
+        NotificationCenter.default.publisher(for: .dockIconVisibilityChanged)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] notification in
+                guard let self = self,
+                      let show = notification.object as? Bool,
+                      let state = self.state else { return }
+                state.config.showDockIcon = show
+            }
+            .store(in: &cancellables)
+
+        applyIcon(running: state.isRunning)
+
+        // 菜单栏项在某些环境下会创建失败（比如菜单栏满了），这时得让用户知道，
+        // 否则关掉窗口就再也找不到这个软件了。
+        if statusItem?.button == nil {
+            state.log("[系统] 菜单栏图标创建失败，请通过程序坞打开窗口")
+        } else {
+            state.log("[系统] 菜单栏图标已就绪")
+        }
+    }
+
+    /// Cloudflare 橙黄 = 未运行，蓝色 = 已运行
+    static let offColor = NSColor(srgbRed: 0.965, green: 0.510, blue: 0.122, alpha: 1) // #F6821F
+    static let onColor  = NSColor(srgbRed: 0.125, green: 0.478, blue: 1.000, alpha: 1) // #207AFF
+
+    private func applyIcon(running: Bool) {
+        guard let button = statusItem?.button else { return }
+
+        // 云朵用代码画（见 CloudIcon）：空心=停止、实心=运行。
+        // 形状本身就能分辨状态，不必只依赖颜色。
+        let img = CloudIcon.make(filled: running, size: 18)
+        button.image = img.tinted(Self.color(running: running))
+        button.toolTip = running ? "ECH 代理已运行" : "ECH 代理未运行"
+    }
+
+    static func color(running: Bool) -> NSColor { running ? onColor : offColor }
+
+    // 每次点开都重建，保证状态和服务器列表都是最新的
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        guard let state else { return }
+        let running = state.isRunning
+
+        // 状态行：一个圆点 + 一句话，不堆细节
+        let status = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        let dot = NSAttributedString(
+            string: running ? "● " : "○ ",
+            attributes: [.foregroundColor: Self.color(running: running),
+                         .font: NSFont.systemFont(ofSize: 13)])
+        let text = NSAttributedString(
+            string: running ? "ECH 代理已运行" : "ECH 代理未运行",
+            attributes: [.foregroundColor: NSColor.labelColor,
+                         .font: NSFont.systemFont(ofSize: 12, weight: .medium)])
+        let line = NSMutableAttributedString()
+        line.append(dot)
+        line.append(text)
+        status.attributedTitle = line
+        status.isEnabled = false
+        menu.addItem(status)
+
+        menu.addItem(.separator())
+
+        add(menu, "显示应用", #selector(showApp))
+        add(menu, running ? "关闭 ECH 代理" : "开启 ECH 代理", #selector(toggleProxy))
+
+        // 选择服务器
+        let serverItem = NSMenuItem(title: "选择服务器", action: nil, keyEquivalent: "")
+        let sub = NSMenu()
+        for s in state.config.servers {
+            let mi = NSMenuItem(title: s.name.isEmpty ? "未命名" : s.name,
+                                action: #selector(pickServer(_:)), keyEquivalent: "")
+            mi.target = self
+            mi.representedObject = s.id
+            mi.state = (s.id == state.selected?.id) ? .on : .off
+            // 运行中切服务器会让连接和配置对不上，直接禁掉
+            mi.isEnabled = !running
+            sub.addItem(mi)
+        }
+        serverItem.submenu = sub
+        menu.addItem(serverItem)
+
+        menu.addItem(.separator())
+
+        let dock = NSMenuItem(title: "在程序坞显示图标",
+                              action: #selector(toggleDockIcon), keyEquivalent: "")
+        dock.target = self
+        // 实时读取配置状态，确保勾选状态始终与实际同步
+        dock.state = state.config.showDockIcon ? .on : .off
+        menu.addItem(dock)
+
+        menu.addItem(.separator())
+        add(menu, "退出应用", #selector(quitApp))
+    }
+
+    private func add(_ menu: NSMenu, _ title: String, _ action: Selector) {
+        let mi = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        mi.target = self
+        menu.addItem(mi)
+    }
+
+    @objc private func showApp() {
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+        for w in NSApp.windows where w.contentView != nil {
+            w.makeKeyAndOrderFront(nil)
+        }
+    }
+
+    @objc private func toggleProxy() { state?.toggle() }
+
+    @objc private func toggleDockIcon() {
+        guard let state else { return }
+        let newValue = !state.config.showDockIcon
+        state.setShowDockIcon(newValue)
+        // 菜单打开时直接更新勾选状态，不用等下次打开菜单
+        if let menu = statusItem?.menu,
+           let item = menu.items.first(where: { $0.action == #selector(toggleDockIcon) }) {
+            item.state = newValue ? .on : .off
+        }
+    }
+
+    @objc private func pickServer(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? UUID else { return }
+        state?.select(id)
+    }
+
+    @objc private func quitApp() {
+        state?.shutdown()
+        NSApp.terminate(nil)
+    }
+}
+
+
+private extension NSImage {
+    /// 按指定颜色重绘图标。菜单栏项要显示品牌色就得自己染，
+    /// 模板图标只会跟着系统明暗走。
+    func tinted(_ color: NSColor) -> NSImage {
+        let img = NSImage(size: size)
+        img.lockFocus()
+        color.set()
+        let rect = NSRect(origin: .zero, size: size)
+        draw(in: rect)
+        rect.fill(using: .sourceAtop)
+        img.unlockFocus()
+        img.isTemplate = false
+        return img
+    }
+}
