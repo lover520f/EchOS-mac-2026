@@ -23,6 +23,13 @@ mkdir -p "$STAGE" "$MNT"
 cp -R "$APP" "$STAGE/"
 ln -s /Applications "$STAGE/Applications"
 
+# 预置 Finder 布局：assets/dmg-layout.DS_Store 是竖版布局（EchOS.app 上、Applications 下）。
+# CI 没有 GUI 会话，AppleScript 配不了布局，所以这里直接烧一个成品 .DS_Store 进 DMG，
+# 用户首次打开就是上下的，不依赖 Finder。
+if [ -f "$ROOT/assets/dmg-layout.DS_Store" ]; then
+  cp "$ROOT/assets/dmg-layout.DS_Store" "$STAGE/.DS_Store"
+fi
+
 # 磁盘图标（从 SVG 生成满铺版，无透明圆角）
 if [ -f "$ROOT/assets/icon.svg" ]; then
   VOLICON_SVG="/tmp/echos-volicon.svg"
