@@ -7,3 +7,12 @@ build/
 # Xcode / Swift
 *.xcuserstate
 DerivedData/
+
+# 分流规则数据（24MB 二进制，来自上游开源项目，构建前用 fetch-geodata.sh 下载）
+assets/geoip.dat
+assets/geosite.dat
+
+# 用户配置与日志（运行时生成在用户目录，兜底忽略）
+config.json
+logs/
+*.log

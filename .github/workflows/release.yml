@@ -32,6 +32,10 @@ jobs:
           /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VER" gui/Info.plist
           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VER" gui/Info.plist
 
+      - name: Fetch geo data
+        # geoip.dat / geosite.dat 不进仓库，构建前下载最新版（本地已存在则跳过）
+        run: ./fetch-geodata.sh
+
       - name: Build app
         run: ./build.sh
 
@@ -42,23 +46,32 @@ jobs:
       - name: List artifacts
         run: ls -la build/
 
-      # 改动说明自动生成：GitHub 根据两个 Release 之间的 commit / PR
-      # 生成「What's Changed」列表。上一个版本标签直接用 git 历史里找
-      # （不依赖 Release 创建顺序，两个 tag 一起推也稳）；首个版本没有
-      # 前一个标签，就只输出静态说明。想要人工润色时，Release 发布后
-      # 可直接在 GitHub 网页上编辑正文。
+      # 改动说明：优先取 CHANGELOG.md 里对应版本的段落（# 号注释的行）
+      # 作为正文；没有写就退回 GitHub 自动生成。想人工润色也可以在
+      # Release 发布后直接到网页上编辑正文。
       - name: Generate release notes
         run: |
           TAG="${GITHUB_REF_NAME}"
-          PREV=$(git tag --sort=-version:refname | sed -n '2p')
-          if [ -n "$PREV" ] && [ "$PREV" != "$TAG" ]; then
-            NOTES=$(gh api -X POST "repos/${{ github.repository }}/releases/generate-notes" \
-              -f tag_name="$TAG" \
-              -f target_commitish="$(git rev-parse HEAD)" \
-              -f previous_tag_name="$PREV" \
-              --jq '.body')
-          else
-            NOTES="首次发布，包含完整功能。"
+          NOTES=""
+          if [ -f CHANGELOG.md ]; then
+            # 提取 "## v1.0.1"（或 "## 1.0.1"）段落，直到下一个 "## " 为止
+            NOTES=$(awk -v t="$TAG" -v t2="${TAG#v}" '
+              $0 ~ "^## +" (t "|" t2) "$" { insec=1; next }
+              insec && $0 ~ "^## " { exit }
+              insec { print }
+            ' CHANGELOG.md)
+          fi
+          if [ -z "$NOTES" ]; then
+            PREV=$(git tag --sort=-version:refname | sed -n '2p')
+            if [ -n "$PREV" ] && [ "$PREV" != "$TAG" ]; then
+              NOTES=$(gh api -X POST "repos/${{ github.repository }}/releases/generate-notes" \
+                -f tag_name="$TAG" \
+                -f target_commitish="$(git rev-parse HEAD)" \
+                -f previous_tag_name="$PREV" \
+                --jq '.body')
+            else
+              NOTES="首次发布，包含完整功能。"
+            fi
           fi
           {
             echo "## EchOS $TAG"

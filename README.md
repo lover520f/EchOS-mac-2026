@@ -56,7 +56,7 @@
 | 服务端口 | 连接端口 | `443` |
 | 监听地址 | 本地代理地址 | `127.0.0.1` |
 | 监听端口 | SOCKS5 端口，HTTP 自动 +1 | `30000` |
-| 优选IP(域名) | Cloudflare 优选 IP，逗号分隔 | `104.16.x.x` |
+| 优选IP(域名) | Cloudflare 优选 IP，逗号分隔 | `104.16.158.132` |
 | ECH域名 | ECH 公钥查询域名 | `cloudflare-ech.com` |
 | DOH服务器 | ECH 公钥查询 DNS | `dns.alidns.com/dns-query` |
 | TOKEN | 可选，与服务端 Workers 的 `TOKEN` 环境变量一致 | |
@@ -100,17 +100,23 @@ TOKEN=你的密钥 ./deploy-worker.sh
 需要 Xcode 命令行工具（`swiftc`）和 Go 1.22+。
 
 ```bash
-# 编译 App（通用二进制，Intel + Apple Silicon）
+# 1) 下载分流规则数据（geoip.dat / geosite.dat，24MB 二进制，不进仓库）
+./fetch-geodata.sh
+
+# 2) 编译 App（通用二进制，Intel + Apple Silicon）
 ./build.sh
 
 # 仅编译当前架构（更快）
 UNIVERSAL=0 ./build.sh
 
-# 打包 DMG
+# 3) 打包 DMG
 ./make-dmg.sh
 ```
 
 产物：`build/EchOS.app` 或 `build/EchOS-mac-<版本>-universal-x64.dmg`
+
+> `fetch-geodata.sh` 下载过之后会跳过；想强制更新最新数据，删掉 `assets/geoip.dat`
+> 和 `assets/geosite.dat` 再跑一次即可。
 
 ---
 
@@ -121,6 +127,8 @@ echos/
 ├── Worker-ECH.js          # Cloudflare Worker 服务端（完整代码）
 ├── wrangler.toml          # Worker 配置（名称、入口）
 ├── deploy-worker.sh       # 一键部署脚本（wrangler CLI）
+├── CHANGELOG.md           # 更新日志（发版时自动作为 Release 正文）
+├── fetch-geodata.sh       # 下载分流数据 geoip.dat / geosite.dat
 ├── core/                  # Go 内核 (x-tunnel)
 │   ├── x-tunnel.go        # 入口：参数解析、端口监听、隧道调度
 │   ├── simple_ws.go       # WebSocket 隧道
@@ -132,11 +140,6 @@ echos/
 │   │   ├── AppState.swift      # 状态管理、内核生命周期
 │   │   ├── Config.swift        # 配置模型、命令行参数
 │   │   ├── ContentView.swift   # 主界面
-│   │   ├── ServerShare.swift   # 服务器分享文件格式
-│   │   ├── ShareSheet.swift    # 分享多选弹窗
-│   │   ├── WebDAVClient.swift  # 极简 WebDAV 上传/下载
-│   │   ├── WebDAVSettingsView.swift # WebDAV 设置弹窗
-│   │   ├── KeychainStore.swift # 钥匙串存取（WebDAV 密码）
 │   │   ├── SelfCheck.swift     # 连通性自检
 │   │   ├── SystemProxy.swift   # 系统代理接管
 │   │   ├── StatusBar.swift     # 菜单栏控制器
@@ -145,11 +148,13 @@ echos/
 │   │   └── ...
 │   ├── Info.plist
 │   └── AppIcon.icns
-├── assets/                # 分流数据（geoip.dat / geosite.dat）、菜单栏图标
+├── assets/                # 分流数据（构建前下载）、菜单栏图标
 ├── docs/screenshot.png    # 界面截图
 ├── build.sh               # 编译脚本
 └── make-dmg.sh            # DMG 打包脚本
 ```
+
+> 1.0.2（服务器分享、WebDAV 备份）在 git 历史 `v1.0.2` 标签中，不在当前树里。
 
 ---
 
@@ -160,6 +165,17 @@ echos/
 - 没有 Apple Developer ID 签名，对方首次需要**右键 → 打开**绕过 Gatekeeper
 - 如要彻底消除 Gatekeeper 弹窗，需购买 Apple Developer Program 并签名
 
+## 不传 GitHub 的文件
+
+以下内容**不会**出现在 GitHub 仓库里（`.gitignore` 兜底）：
+
+| 内容 | 原因 |
+|---|---|
+| `build/`（app、DMG） | 编译产物，由 Actions 发版时自动生成 |
+| `assets/geoip.dat`、`assets/geosite.dat` | 24MB 二进制，上游开源数据，构建前用 `fetch-geodata.sh` 下载 |
+| `.DS_Store` | macOS 系统文件 |
+| `config.json`、`logs/` | 用户配置与日志（在用户目录，运行时生成） |
+
 ---
 
 ## 版本记录
@@ -169,7 +185,7 @@ echos/
 | 1.0.1 | 基础版：多服务器（新增即命名、未保存不落盘、重名拦截）、分流、系统代理、自检 |
 | 1.0.2 | 新增服务器分享、本地/WebDAV 备份（WebDAV 目录可选）、保存结果弹窗等 |
 
-每次 Release 的改动说明由 GitHub 根据两次发布之间的提交自动生成。
+每次 Release 的改动说明优先取 `CHANGELOG.md` 里对应版本的段落，没写则退回自动生成。
 
 ---
 
