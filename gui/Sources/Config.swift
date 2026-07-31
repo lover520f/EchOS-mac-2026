@@ -566,7 +566,7 @@ struct AppConfig: Codable {
         autoSystemProxy = b(.autoSystemProxy, true)
         showDiagnosticLogs = b(.showDiagnosticLogs, false)
         logLevel = ((try? c.decodeIfPresent(LogLevel.self, forKey: .logLevel)) ?? nil) ?? .info
-        showDockIcon = b(.showDockIcon, true)
+        showDockIcon = b(.showDockIcon, false)
         logVisible = b(.logVisible, true)
     }
 

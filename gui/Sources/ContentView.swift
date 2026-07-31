@@ -5,6 +5,11 @@ struct ContentView: View {
     @EnvironmentObject var app: AppState
     @State private var renaming = false
     @State private var renameText = ""
+    /// 命名/改名的错误提示（重名、空名）
+    @State private var nameErrorText = ""
+    @State private var showNameError = false
+    /// 当前服务器还没保存过就想新建下一个
+    @State private var addNewBlocked = false
     @State private var confirmDelete = false
     @State private var rulesExpanded = false
     @State private var ruleSearch = ""
@@ -54,14 +59,49 @@ struct ContentView: View {
         }
         .frame(minWidth: 720, minHeight: 762)
         .onAppear {
+            // 全新安装（还没有配置文件）：直接建一个待起名的服务器并弹命名框，
+            // 不显示「还没有服务器」空态 —— 第一次操作就是给服务器起名字。
+            if app.config.servers.isEmpty,
+               !FileManager.default.fileExists(atPath: AppConfig.fileURL.path) {
+                app.addServer()
+            }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { syncWindowHeight() }
         }
         .onChange(of: rulesExpanded) { _ in syncWindowHeight() }
         .onChange(of: app.selected?.customRules.count ?? 0) { _ in syncWindowHeight() }
-        .alert("重命名服务器", isPresented: $renaming) {
-            TextField("服务器名称", text: $renameText)
+        .onChange(of: app.needsNameInput) { need in
+            if need {
+                app.needsNameInput = false
+                renameText = ""
+                renaming = true
+            }
+        }
+        .alert(
+            (app.selected?.name.isEmpty ?? true) ? "新建服务器名称" : "重命名服务器",
+            isPresented: $renaming
+        ) {
+            TextField("例如：家庭主路由", text: $renameText)
             Button("取消", role: .cancel) {}
-            Button("确定") { app.rename(to: renameText) }
+            Button("确定") {
+                if let err = app.rename(to: renameText) {
+                    nameErrorText = err
+                    showNameError = true
+                }
+            }
+        } message: {
+            Text((app.selected?.name.isEmpty ?? true)
+                 ? "给新服务器起个名字，之后可在任何位置改。"
+                 : "输入新名字，回车确认。")
+        }
+        .alert("无法使用这个名字", isPresented: $showNameError) {
+            Button("好", role: .cancel) {}
+        } message: {
+            Text(nameErrorText)
+        }
+        .alert("当前服务器状态未确认", isPresented: $addNewBlocked) {
+            Button("好", role: .cancel) {}
+        } message: {
+            Text("请填写完整参数后「保存」。\n如不需要，请「删除」当前服务器。")
         }
         .alert("删除服务器？", isPresented: $confirmDelete) {
             Button("取消", role: .cancel) {}
@@ -114,6 +154,31 @@ struct ContentView: View {
         showSaveResult = true
     }
 
+    /// 带底色实心按钮。
+    ///
+    /// macOS 的 borderedProminent 在窗口失去焦点时会整体变灰，
+    /// 这里用固定背景色，失焦也不变色。文字用 .primary，跟随系统模式
+    /// （亮色黑字、暗色白字），和「新增/重命名」保持一致。
+    private func persistentTint<Label: View>(
+        _ color: Color,
+        isActive: Bool,
+        action: @escaping () -> Void,
+        @ViewBuilder label: () -> Label
+    ) -> some View {
+        Button(action: action) {
+            label()
+                .font(.system(size: 13.5, weight: .semibold))
+                .tracking(0.8)
+                .foregroundStyle(.primary)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 4)
+                .background(color, in: RoundedRectangle(cornerRadius: 5))
+                .opacity(isActive ? 1 : 0.4)
+        }
+        .buttonStyle(.plain)
+        .disabled(!isActive)
+    }
+
     // MARK: - 标题栏
 
     private var titleBar: some View {
@@ -145,14 +210,14 @@ struct ContentView: View {
                     Text("还没有服务器：点「新增」开始创建")
                         .font(.system(size: 12))
                         .foregroundColor(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
                 } else {
                     Picker("", selection: Binding(
                         get: { app.config.selectedID ?? app.config.servers.first?.id ?? UUID() },
                         set: { app.select($0) }
                     )) {
-                        ForEach(app.config.servers) { s in
-                            Text(s.name.isEmpty ? "未命名" : s.name).tag(s.id)
+                        ForEach(Array(app.config.servers.enumerated()), id: \.element.id) { index, s in
+                            // 空名按位置编号显示，避免同时出现多个一模一样的「未命名」
+                            Text(s.name.isEmpty ? "未命名 \(index + 1)" : s.name).tag(s.id)
                         }
                     }
                     .labelsHidden()
@@ -160,17 +225,30 @@ struct ContentView: View {
                     .allowsHitTesting(!app.isRunning)
                 }
 
-                Button("新增") { app.addServer() }
-                    .disabled(app.isRunning)
+                Button("新增") {
+                    if !app.hasUncommittedServer {
+                        app.addServer()
+                    } else {
+                        addNewBlocked = true
+                    }
+                }
+                .disabled(app.isRunning)
+                .help("还有服务器没保存时不能新增下一个，先保存或删除")
                 Button("重命名") {
                     renameText = app.selected?.name ?? ""
                     renaming = true
                 }
                 .disabled(app.isRunning)
-                Button("保存") { saveSelected() }
-                    .disabled(app.isRunning)
-                Button("删除") { confirmDelete = true }
-                    .disabled(app.isRunning)
+                persistentTint(.green, isActive: !app.isRunning) {
+                    saveSelected()
+                } label: {
+                    Text("保存")
+                }
+                persistentTint(.red, isActive: !app.isRunning) {
+                    confirmDelete = true
+                } label: {
+                    Text("删除")
+                }
 
                 Spacer()
 
@@ -218,8 +296,8 @@ struct ContentView: View {
     private var optionalGroup: some View {
         group("高级选项", icon: "slider.horizontal.3", tint: .orange) {
             VStack(spacing: 9) {
-                row("TOKEN:", binding(\.token), placeholder: "")
-                row("优选IP(域名):", binding(\.ip), placeholder: "198.41.223.133")
+                row("TOKEN(可选):", binding(\.token), placeholder: "")
+                row("优选IP(域名):", binding(\.ip), placeholder: "104.16.158.132")
                 presetRow("ECH域名:", binding(\.ech), options: EchPresets.echDomains,
                           placeholder: "cloudflare-ech.com",
                           help: "去哪个域名查 ECH 公钥。注意这不是伪装域名 —— Cloudflare 的 ECH 域名固定是 cloudflare-ech.com。")
@@ -438,30 +516,20 @@ struct ContentView: View {
 
                 Spacer()
 
-                Button {
+                persistentTint(.blue, isActive: !app.isRunning && !app.isStarting) {
                     app.start()
                 } label: {
                     Label("启动代理", systemImage: "play.fill")
-                        .font(.system(size: 13, weight: .medium))
                         .frame(width: 84)
-                        .padding(.vertical, 4)
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(.blue)
-                .disabled(app.isRunning || app.isStarting)
                 .keyboardShortcut(.return, modifiers: .command)
 
-                Button {
+                persistentTint(.red, isActive: app.isRunning || app.isStarting) {
                     app.stop()
                 } label: {
                     Label("停止代理", systemImage: "stop.fill")
-                        .font(.system(size: 13, weight: .medium))
                         .frame(width: 84)
-                        .padding(.vertical, 4)
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(.red)
-                .disabled(!app.isRunning && !app.isStarting)
             }
             .toggleStyle(.checkbox)
             .font(.system(size: 12.5))
@@ -526,7 +594,7 @@ struct ContentView: View {
             HStack(spacing: 10) {
                 Button {
                     app.config.logVisible.toggle()
-                    app.config.save()
+                    app.persist()
                 } label: {
                     HStack(spacing: 4) {
                         Image(systemName: app.config.logVisible ? "chevron.down" : "chevron.right")
@@ -543,7 +611,7 @@ struct ContentView: View {
                 if app.config.logVisible {
                     Picker("", selection: Binding(
                         get: { app.config.logLevel },
-                        set: { v in app.config.logLevel = v; app.config.save() }
+                        set: { v in app.config.logLevel = v; app.persist() }
                     )) {
                         ForEach(LogLevel.allCases) { l in Text(l.title).tag(l) }
                     }

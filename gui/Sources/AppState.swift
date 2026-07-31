@@ -14,6 +14,11 @@ final class AppState: ObservableObject {
     /// 自检记录单独一份，切到"自检记录"视图时显示这个
     @Published var checkLines: [String] = []
     @Published var systemProxySummary: String = ""
+    /// 刚新增/重建了还没起名的服务器，界面据此立刻弹起命名框
+    @Published var needsNameInput = false
+    /// 已通过「保存」校验、允许写盘的服务器 ID。
+    /// 未提交的服务器只在内存里存活（可编辑、可切换），退出重开后消失。
+    private var committedIDs: Set<UUID> = []
     @Published var proxyTakenOver = SystemProxy.isActive
 
     private var process: Process?
@@ -29,11 +34,12 @@ final class AppState: ObservableObject {
 
     init() {
         self.config = AppConfig.load()
+        committedIDs = Set(self.config.servers.map(\.id))
         // 读进来时可能做过格式迁移（比如把 host:port 拆成两个字段），
         // 立刻回写一次让文件里也是新格式，免得迁移逻辑一直悬着。
         // 全新安装（还没有配置文件）就不写：保持零配置，等用户第一次操作再落盘。
         if FileManager.default.fileExists(atPath: AppConfig.fileURL.path) {
-            self.config.save()
+            persist()
         }
         LogFile.startNewSession()
         recoverFromUncleanExit()
@@ -81,29 +87,53 @@ final class AppState: ObservableObject {
         return config.servers.firstIndex { $0.id == s.id }
     }
 
+    /// 是否还存在没保存过的服务器。有的话不允许新增下一个。
+    var hasUncommittedServer: Bool {
+        config.servers.contains { !committedIDs.contains($0.id) }
+    }
+
     func update(_ mutate: (inout ServerConfig) -> Void) {
         guard let idx = selectedIndex else { return }
         mutate(&config.servers[idx])
+    }
+
+    /// 落盘：只写「已提交」的服务器和全局偏好。
+    /// 未点过「保存」的服务器不持久化 —— 退出、切设置开关等任何保存路径
+    /// 都不会把内存里没校验过的服务器带进配置文件。
+    func persist() {
+        var out = config
+        out.servers = config.servers.filter { committedIDs.contains($0.id) }
+        out.save()
     }
 
     /// 保存当前服务器配置到文件。不完整时返回错误原因并拒绝保存，成功返回 nil。
     @discardableResult
     func saveCurrentServer() -> String? {
         guard let idx = selectedIndex else { return "没有选中的服务器" }
+        let n = config.servers[idx].name.trimmingCharacters(in: .whitespaces)
+        if n.isEmpty { return "请先给服务器起个名字" }
+        if config.servers.contains(where: { $0.id != config.servers[idx].id
+            && $0.name.trimmingCharacters(in: .whitespaces) == n }) {
+            return "已有同名服务器「\(n)」，请换个名字"
+        }
         if let err = config.servers[idx].validate() {
             log("[系统] 保存失败：\(err)")
             return err
         }
-        config.save()
+        committedIDs.insert(config.servers[idx].id)
+        persist()
         log("[系统] 服务器配置已保存")
         return nil
     }
 
     func addServer() {
         var s = ServerConfig()
-        s.name = "服务器 \(config.servers.count + 1)"
+        // 不自动起名「服务器 N」：名字由弹窗里用户亲手输入，
+        // 免得每次新增都白得一个还得手动改掉的默认名。
+        s.name = ""
         config.servers.append(s)
         config.selectedID = s.id
+        needsNameInput = true
         // 不立即持久化：新服务器一个字段都没填，跟着「必填」逻辑走 ——
         // 填完整点「保存」才算数。免得导入配置时混进一堆空服务器。
     }
@@ -113,34 +143,52 @@ final class AppState: ObservableObject {
         guard let cur = selected else { return }
         var copy = cur
         copy.id = UUID()
-        copy.name = cur.name + " 副本"
+        let base = cur.name + " 副本"
+        var n = base
+        var i = 2
+        while config.servers.contains(where: { $0.name.trimmingCharacters(in: .whitespaces) == n }) {
+            n = base + " \(i)"
+            i += 1
+        }
+        copy.name = n
         config.servers.append(copy)
         config.selectedID = copy.id
-        config.save()
+        committedIDs.insert(copy.id)
+        persist()
     }
 
-    func rename(to newName: String) {
+    /// 起名/改名。名字为空或与其它服务器重名时拒绝，返回错误原因，成功返回 nil。
+    @discardableResult
+    func rename(to newName: String) -> String? {
         let n = newName.trimmingCharacters(in: .whitespaces)
-        guard !n.isEmpty else { return }
-        update { $0.name = n }
+        guard !n.isEmpty else { return "服务器名称不能为空" }
+        guard let idx = selectedIndex else { return "没有选中的服务器" }
+        let id = config.servers[idx].id
+        if config.servers.contains(where: { $0.id != id && $0.name.trimmingCharacters(in: .whitespaces) == n }) {
+            return "已有同名服务器「\(n)」，请换个名字"
+        }
+        config.servers[idx].name = n
+        return nil
     }
 
     func delete(id: UUID) {
         guard let idx = config.servers.firstIndex(where: { $0.id == id }) else { return }
         config.servers.remove(at: idx)
+        committedIDs.remove(id)
 
         // 删到一个不剩就补一个空白的。之前是"最后一个不许删"，
         // 可用户想清空重填时只能一个个改字段，很别扭 ——
         // 让他删，然后给个干净的新配置继续填。
         if config.servers.isEmpty {
             var fresh = ServerConfig()
-            fresh.name = "服务器 1"
+            fresh.name = ""
             config.servers = [fresh]
+            needsNameInput = true
         }
         if config.selectedID == id || !config.servers.contains(where: { $0.id == config.selectedID }) {
             config.selectedID = config.servers.first?.id
         }
-        config.save()
+        persist()
     }
 
     func deleteSelected() {
@@ -150,8 +198,10 @@ final class AppState: ObservableObject {
 
     func select(_ id: UUID) {
         guard !isRunning && !isStarting else { return }
+        // 只切换内存中的选中项，不落盘 —— 这里一 save 会把还没通过「必填」校验的
+        // 服务器整份写进配置（Picker 的 set 在界面刷新时会回调到这里）。
+        // 选中状态等下一次真正保存时一并持久化。
         config.selectedID = id
-        config.save()
     }
 
     // MARK: - 自定义分流规则
@@ -200,7 +250,7 @@ final class AppState: ObservableObject {
     /// 状态持久化到配置文件，重启后保持不变。
     func setShowDockIcon(_ show: Bool) {
         config.showDockIcon = show
-        config.save()
+        persist()
         applyDockIconPolicy()
         log("[系统] 程序坞图标已\(show ? "显示" : "隐藏")")
     }
@@ -589,7 +639,7 @@ final class AppState: ObservableObject {
     /// 没运行则只记下偏好，等下次启动时用。
     func setAutoSystemProxy(_ on: Bool) {
         config.autoSystemProxy = on
-        config.save()
+        persist()
 
         guard isRunning else {
             log("[系统代理] 已\(on ? "开启" : "关闭")自动设置，下次启动代理时生效")
@@ -635,7 +685,12 @@ final class AppState: ObservableObject {
         process?.terminate()
         process = nil
         KernelPID.clear()
-        config.save()
+        // 只有已保存过服务器、或本来就有配置文件时才落盘：
+        // 全新安装啥都没保存就退出，不凭空生成配置文件（否则下次启动
+        // 会被当成"空配置"而不是"全新安装"，命名框就不会弹了）。
+        if !committedIDs.isEmpty || FileManager.default.fileExists(atPath: AppConfig.fileURL.path) {
+            persist()
+        }
         LogFile.close()
     }
 }

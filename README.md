@@ -22,7 +22,7 @@
 - **系统代理一键接管** — 启动即接管 Safari / Chrome 等全部系统代理流量，停止时自动还原
 - **三种分流模式** — 绕过中国大陆 / 黑名单 / 全局
 - **自定义分流规则** — 域名、IP 段、网站分类（geosite / geoip），支持搜索与展开查看
-- **多服务器管理** — 新增、重命名、删除；参数不完整时拒绝保存并弹窗说明原因
+- **多服务器管理** — 新增即弹「新建服务器名称」；参数不完整或重名时拒绝保存并弹窗说明；有未保存的服务器时无法新建下一个；只有点过「保存」的服务器才会落盘，未保存的退出后自动丢弃
 - **服务器分享**（1.0.2）— 把服务器导出成文件给其他设备，或从分享文件一键导入
 - **整配置备份**（1.0.2）— 本地文件 / WebDAV 两种备份方式；WebDAV 密码存系统钥匙串，配置里只留地址、用户名和可选目录
 - **连通性自检** — 启动后自动检测本地端口、国内直连、隧道连通性，结果写在日志里
@@ -46,7 +46,7 @@
 1. 打开 `EchOS-mac-<版本>-universal-x64.dmg`
 2. 将 `EchOS.app` 拖入 `Applications`
 3. 首次运行时**右键 → 打开**（无 Apple 开发者签名，Gatekeeper 会拦截）
-4. 填好服务器配置 → 点「保存」→ 点「启动代理」
+4. 首次启动弹出「新建服务器名称」，起名后填好服务器配置 → 点「保存」→ 点「启动代理」
 
 ### 配置项
 
@@ -65,11 +65,28 @@
 
 ## Cloudflare 部署（服务端）
 
-服务端是一个 Cloudflare Worker，仓库根目录的 `Worker-ECH.js` 就是完整代码。
+服务端是一个 Cloudflare Worker，仓库根目录的 `Worker-ECH.js` 就是完整代码。仓库已带 `wrangler.toml` 和 `deploy-worker.sh`，两种方式任选：
+
+### 方式一：命令行一键部署（推荐）
+
+```bash
+# 安装 wrangler（需要 Node.js 环境）
+npm install -g wrangler
+
+# 首次需要登录 Cloudflare 账号（会打开浏览器）
+wrangler login
+
+# 部署；需要鉴权时带上 TOKEN（值自定义，一长串随机字符）
+TOKEN=你的密钥 ./deploy-worker.sh
+```
+
+`wrangler.toml` 里的 `name` 就是 Worker 名称，部署前可自行修改。
+
+### 方式二：网页 Dashboard 手动部署
 
 1. 打开 [Cloudflare Dashboard](https://dash.cloudflare.com) → **Workers & Pages** → **Create** → 选 **Workers**
 2. 名称随意，创建后点 **Edit code**，用 `Worker-ECH.js` 的内容覆盖默认代码，保存
-3. 可选：**Settings → Variables and Secrets → Add**，加一个环境变量 `TOKEN`（值自定义，比如一长串随机字符）
+3. 可选：**Settings → Variables and Secrets → Add**，加一个环境变量 `TOKEN`
    - 设了 TOKEN 后，客户端必须填相同的 TOKEN 才能连上
    - 不设 TOKEN 就是全公开，任何人都能拿你的 Worker 当代理，**强烈建议设置**
 4. 部署后得到一个 `https://<你的名称>.workers.dev` 地址，填进客户端的「服务地址」
@@ -101,7 +118,9 @@ UNIVERSAL=0 ./build.sh
 
 ```
 echos/
-├── Worker-ECH.js          # Cloudflare Worker 服务端（粘贴到 Workers 里即可）
+├── Worker-ECH.js          # Cloudflare Worker 服务端（完整代码）
+├── wrangler.toml          # Worker 配置（名称、入口）
+├── deploy-worker.sh       # 一键部署脚本（wrangler CLI）
 ├── core/                  # Go 内核 (x-tunnel)
 │   ├── x-tunnel.go        # 入口：参数解析、端口监听、隧道调度
 │   ├── simple_ws.go       # WebSocket 隧道
@@ -137,7 +156,7 @@ echos/
 ## 分发说明
 
 - DMG 不含任何用户配置（配置文件在 `~/Library/Application Support/EchOS/config.json`，密码在系统钥匙串）
-- 首次启动生成空白配置，不预置任何服务器
+- 首次启动自动创建一台服务器并弹出「新建服务器名称」命名框；只有点过「保存」的服务器才会写入配置，未保存的服务器退出后自动丢弃
 - 没有 Apple Developer ID 签名，对方首次需要**右键 → 打开**绕过 Gatekeeper
 - 如要彻底消除 Gatekeeper 弹窗，需购买 Apple Developer Program 并签名
 
@@ -147,7 +166,7 @@ echos/
 
 | 版本 | 内容 |
 |---|---|
-| 1.0.1 | 基础版：多服务器、分流、系统代理、自检 |
+| 1.0.1 | 基础版：多服务器（新增即命名、未保存不落盘、重名拦截）、分流、系统代理、自检 |
 | 1.0.2 | 新增服务器分享、本地/WebDAV 备份（WebDAV 目录可选）、保存结果弹窗等 |
 
 每次 Release 的改动说明由 GitHub 根据两次发布之间的提交自动生成。
@@ -157,7 +176,29 @@ echos/
 ## 开源说明
 
 - 本项目基于 MIT 协议开源，详见 [LICENSE](LICENSE)
-- 仅供学习与个人使用，请遵守所在地区的法律法规
-- ECH 是加密传输技术，本身无好坏之分；请勿用于任何非法用途
+- **仅供学习交流使用，请勿用于商业用途；请在下载后 24 小时内删除。**
+- 请遵守所在地区的法律法规；ECH 是加密传输技术，本身无好坏之分，请勿用于任何非法用途
 - `assets/geoip.dat`、`assets/geosite.dat` 为分流规则数据，遵循各自上游开源协议
 - 本项目不提供任何可用的公共代理服务器，服务端需自行部署（见上文 Cloudflare 部署）
+
+---
+
+## 致谢与来源说明
+
+本项目是面向 macOS 的 ECH 加密代理客户端，在多位开源作者的工作基础上适配而来。特别感谢：
+
+- **CCF 大佬**（[@CCF](https://t.me/JPCCF)）—— 客户端开发与整体方案设计，核心能力基于其开源项目 [CF_NAT](https://t.me/CF_NAT) 构建
+- **byJoey 大佬** —— 部分实现参考其开源项目 [ech-wk](https://github.com/byJoey/ech-wk)
+- **CM 大佬**（[CMLiussss](https://t.me/CMLiussss)）—— 优选 IP 方案参考其维护的 ProxyIP 定制优化
+
+在此基础上定制修改出的 Mac 端专用客户端，让部署到 Cloudflare Workers 后的连接、分流与使用体验更加便捷。
+
+本文涉及的工具与技术方案均来源于：
+
+| 内容 | 来源 |
+|---|---|
+| 客户端开发 | [CCF](https://t.me/JPCCF) |
+| 核心开源项目 | [CF_NAT](https://t.me/CF_NAT) |
+| 优选 IP（ProxyIP） | [CMLiussss](https://t.me/CMLiussss) |
+| ECH 协议技术 | [Cloudflare 官方文档](https://developers.cloudflare.com/ssl/edge-certificates/ech/) |
+| 文档支持 | [Cloudflare-ECH-Workers](https://blog.zrf.me/p/Cloudflare-ECH-Workers) |
