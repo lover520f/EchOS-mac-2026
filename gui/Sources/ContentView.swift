@@ -367,7 +367,7 @@ struct ContentView: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .disabled(app.isRunning || app.isStarting)
+                // 导出/导入只读写服务器数据，不影响运行中的代理，运行中也可用
                 .help("导出选中的服务器给其他设备，或导入别人分享的服务器")
 
                 // 备份：整份配置本地 / WebDAV
@@ -403,7 +403,8 @@ struct ContentView: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .disabled(app.isRunning || app.isStarting || app.webdavBusy)
+                // 备份/还原不影响运行中的代理（还原会先停代理并提示），运行中也可用
+                .disabled(app.webdavBusy)
                 .help("把整份配置（服务器 + 分流规则 + 偏好）备份到本地或 WebDAV")
 
                 Button {
