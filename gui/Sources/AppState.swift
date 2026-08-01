@@ -250,7 +250,13 @@ final class AppState: NSObject, ObservableObject {
         if isRunning { rulesDirty = true }
     }
 
-    /// 重启内核让规则生效
+    /// 重启内核让规则生效。
+    ///
+    /// 注意：这是手动的，和 switchRouteMode 的自动重启刻意不同——
+    /// 规则是多字段编辑（类型/域名/动作下拉连点），每个改动都自动重启
+    /// 会频繁断网、还可能在用户还没填完时就重启。所以编辑只标记
+    /// rulesDirty，让用户改完统一点「立即重启」。模式是单选控件，
+    /// 点一次就完成，才适合自动重启。别把它们"统一"了。
     func applyRules() {
         guard isRunning else { rulesDirty = false; return }
         log("[系统] 应用新的分流规则，正在重启代理（会短暂断开）…")
@@ -503,9 +509,11 @@ final class AppState: NSObject, ObservableObject {
         log("[系统] 正在等待代理端口就绪…")
         Task { @MainActor in
             guard let socks = self.activeSocks, let mode = self.selected?.routeMode else {
+                // activeSocks/mode 取不到（服务器被删、端口配置丢了等极端情况），
+                // 绝不该假装"运行中"——否则界面亮绿灯而内核早就没了。
+                // 这里只负责收尾状态，等 terminationHandler 统一处置内核。
                 self.checkState = .idle
                 self.isStarting = false
-                self.isRunning = true
                 return
             }
 
@@ -557,6 +565,15 @@ final class AppState: NSObject, ObservableObject {
                     let detail = failed.map { "\($0.title)：\($0.note)" }.joined(separator: "\n")
                     self.checkState = .failed(detail)
                     self.log("[系统] 隧道自检未完全通过，请查看上方运行日志")
+                    // 端口就绪就接管了系统代理，但探针现在发现隧道其实不通——
+                    // 这时候让浏览器继续走这个"死隧道"，用户只会看到所有网页打不开。
+                    // 把系统代理回滚回去（还原用户原本的设置），并明确告诉他为什么。
+                    // 只信"必须经隧道"的探针（国外站点）：国内直连/本地端口的失败
+                    // 可能只是网络本身的问题，隧道未必坏了，不能因为它就撤代理。
+                    if self.proxyTakenOver, failed.contains(where: { $0.dependsOnTunnel }) {
+                        self.log("[系统] 探针失败，为避免浏览器全挂，已还原系统代理设置")
+                        self.disableSystemProxy()
+                    }
                 }
             }
         }
@@ -665,18 +682,23 @@ final class AppState: NSObject, ObservableObject {
                 // 摘要里带上延迟，一眼能看出快慢
                 let detail = results.map { "\($0.title)：\($0.note)" }.joined(separator: "\n")
                 checkState = .ok(detail)
-                // 通过的结果也进自检记录：只记失败的话，看不出平时延迟是多少，
-                // 也就没法判断"今天怎么变慢了"。
-                for r in results {
-                    log("[自检] ✓ \(r.title)：\(r.note)")
+                // 静默模式（启动后自动跑的那次）：通过的结果也进自检记录，
+                // 只记失败的话，看不出平时延迟是多少，也就没法判断"今天怎么变慢了"。
+                // 手动点按钮时结果已经在上面统一打过了，这里再打就是重复。
+                if silent {
+                    for r in results {
+                        log("[自检] ✓ \(r.title)：\(r.note)")
+                    }
                 }
             } else {
                 let detail = failed.map { "\($0.title)：\($0.note)" }.joined(separator: "\n")
                 checkState = .failed(detail)
-                // 失败无论如何都记一笔，而且要带上原因 ——
+                // 静默模式下失败无论如何都记一笔，而且要带上原因 ——
                 // 只写"某项未通过"等于没说，用户照样不知道该查什么。
-                for f in failed {
-                    log("[自检] ✗ \(f.title)：\(f.note)")
+                if silent {
+                    for f in failed {
+                        log("[自检] ✗ \(f.title)：\(f.note)")
+                    }
                 }
             }
             checking = false

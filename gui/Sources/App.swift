@@ -17,7 +17,7 @@ struct ECHApp: App {
                     app.checkForUpdatesAtStartup()
                 }
         }
-        .defaultSize(width: 735, height: 758)
+        .defaultSize(width: 735, height: AppDelegate.minContentHeight)
         .commands {
             CommandGroup(replacing: .newItem) {}
         }
@@ -61,11 +61,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         DispatchQueue.main.async {
             guard let win = NSApp.windows.first(where: { $0.contentView != nil }) else { return }
             // 只定宽度和最小尺寸；高度交给 ContentView 的 syncWindowHeight
-            // 按当前内容算，免得两处各设一套值互相覆盖
-            win.setContentSize(NSSize(width: 735, height: 774))
+            // 按当前内容算，免得两处各设一套值互相覆盖。
+            // 这里用 minContentHeight（基准 758）兜底铺开，与 defaultSize/minSize
+            // 保持一致，不再单写一个魔法数字 774 —— 那只会让三处尺寸互相打架。
+            win.setContentSize(NSSize(width: 735, height: Self.minContentHeight))
             // minSize 只挡"窗口被拖得太小"：拉到 758（规则收起时内容所需高度）
             // 就停，底部操作行和日志不会被窗口底边盖住
-            win.minSize = NSSize(width: 735, height: 758)
+            win.minSize = NSSize(width: 735, height: Self.minContentHeight)
             win.delegate = self
             win.center()
             win.makeKeyAndOrderFront(nil)

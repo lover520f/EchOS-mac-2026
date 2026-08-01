@@ -11,6 +11,9 @@ enum SelfCheck {
         var title: String
         var ok: Bool
         var note: String
+        /// 是否"必须经隧道才通"的探针（国外站点）。本地端口、国内直连
+        /// 探针失败可能是别的网络问题，不该拿它来决定回滚系统代理。
+        var dependsOnTunnel = false
     }
 
     /// 通过本地 SOCKS5 访问一个地址，返回是否成功和耗时
@@ -83,7 +86,8 @@ enum SelfCheck {
                 title: "国外网站（经隧道）",
                 ok: foreignOK,
                 note: foreignOK ? String(format: "%.0f 毫秒 · 隧道正常", fCost * 1000)
-                                : "失败：\(fNote)"))
+                                : "失败：\(fNote)",
+                dependsOnTunnel: true))
         }
 
         return results
