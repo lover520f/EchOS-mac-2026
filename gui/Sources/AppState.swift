@@ -1039,17 +1039,18 @@ final class AppState: NSObject, ObservableObject {
     }
 
     /// 单一按钮的信息弹窗（检查更新的"已是最新/失败/未配置"结果）。
-    /// 原生 NSAlert 在 macOS 13+ 图标和文字都是居中显示的。
+    /// 原生 NSAlert 在 macOS 13+ 图标和文字都是居中显示的，窗口也居中。
     private func showSimpleDialog(_ text: String) {
         let alert = NSAlert()
         alert.icon = NSApp.applicationIconImage
         alert.messageText = "检查更新"
         alert.informativeText = text
         alert.addButton(withTitle: "好")
+        alert.window.center()
         alert.runModal()
     }
 
-    /// 发现新版本时的独立弹窗（原生 NSAlert，图标与文字居中，不打开主窗口）。
+    /// 发现新版本时的独立弹窗（原生 NSAlert，图标与文字居中，窗口居中，不打开主窗口）。
     /// messageText（加粗标题）= 当前版本；informativeText（正常正文）= 发现新版本。
     private func promptUpdateDialog(_ info: Updater.ReleaseInfo) {
         let alert = NSAlert()
@@ -1058,6 +1059,7 @@ final class AppState: NSObject, ObservableObject {
         alert.informativeText = "发现新版本 \(info.tag)"
         alert.addButton(withTitle: "下载并更新")
         alert.addButton(withTitle: "以后再说")
+        alert.window.center()
         if alert.runModal() == .alertFirstButtonReturn {
             downloadUpdate()
         }
@@ -1128,6 +1130,7 @@ final class AppState: NSObject, ObservableObject {
 
         let label = NSTextField(labelWithString: "正在下载 \(updateInfo?.dmgName ?? "新版本")…")
         label.font = .systemFont(ofSize: 13)
+        label.alignment = .center   // 内容居中
         label.lineBreakMode = .byTruncatingMiddle
 
         let indicator = NSProgressIndicator()
@@ -1144,6 +1147,7 @@ final class AppState: NSObject, ObservableObject {
 
         let stack = NSStackView(views: [label, indicator, cancelButton])
         stack.orientation = .vertical
+        stack.alignment = .centerX   // 内容水平居中
         stack.spacing = 12
         stack.edgeInsets = NSEdgeInsets(top: 18, left: 18, bottom: 18, right: 18)
         indicator.translatesAutoresizingMaskIntoConstraints = false
