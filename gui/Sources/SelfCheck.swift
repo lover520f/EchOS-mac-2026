@@ -45,15 +45,21 @@ enum SelfCheck {
         }
     }
 
-    /// 探测一次，失败就再试一次。
+    /// 探测几次，失败就隔一段重试。
     /// 网络抖一下就亮红灯比不检还糟 —— 用户会以为真断了，跑去改配置。
-    private static func probeTwice(via socks: (host: String, port: Int),
-                                   url: String, timeout: TimeInterval) async -> (Bool, TimeInterval, String) {
-        let first = await probe(via: socks, url: url, timeout: timeout)
-        if first.0 { return first }
-        try? await Task.sleep(nanoseconds: 600_000_000)
-        let second = await probe(via: socks, url: url, timeout: timeout)
-        return second.0 ? second : (false, second.1, second.2 + "（重试两次均失败）")
+    /// 实测远程出口（共享机房 IP）对个别站点会瞬时封禁几十秒再恢复，
+    /// 所以间隔要拉开（1s、3s），给恢复留出窗口，别被一次抖动骗到。
+    private static func probeRobust(via socks: (host: String, port: Int),
+                                    url: String, timeout: TimeInterval) async -> (Bool, TimeInterval, String) {
+        var last = await probe(via: socks, url: url, timeout: timeout)
+        if last.0 { return last }
+        for gap in [1.0, 3.0] {
+            try? await Task.sleep(nanoseconds: UInt64(gap * 1_000_000_000))
+            let again = await probe(via: socks, url: url, timeout: timeout)
+            if again.0 { return again }
+            last = again
+        }
+        return (false, last.1, last.2 + "（多次重试仍失败，可能出口被目标站点临时拦截）")
     }
 
     /// 跑一轮完整自检
@@ -69,7 +75,7 @@ enum SelfCheck {
         guard portOK else { return results }
 
         // 2) 国内站点：规则模式下应该直连，全局模式下走隧道
-        let (cnOK, cnCost, cnNote) = await probeTwice(via: socks, url: "https://www.baidu.com", timeout: 8)
+        let (cnOK, cnCost, cnNote) = await probeRobust(via: socks, url: "https://www.baidu.com", timeout: 8)
         results.append(Result(
             title: "国内网站（百度）",
             ok: cnOK,
@@ -79,9 +85,9 @@ enum SelfCheck {
         // 3) 国外站点：这一条最能反映隧道是否真的通。
         // 黑名单模式下 google 也在名单里，同样该走隧道。
         do {
-            let (foreignOK, fCost, fNote) = await probeTwice(via: socks,
-                                                             url: "https://www.gstatic.com/generate_204",
-                                                             timeout: 8)
+            let (foreignOK, fCost, fNote) = await probeRobust(via: socks,
+                                                              url: "https://www.gstatic.com/generate_204",
+                                                              timeout: 8)
             results.append(Result(
                 title: "国外网站（经隧道）",
                 ok: foreignOK,
