@@ -1038,19 +1038,25 @@ final class AppState: NSObject, ObservableObject {
         }
     }
 
+    /// 让 NSAlert 弹窗窗口尽量居中。注意：runModal() 会自己重排窗口位置，
+    /// 模态会话期间也无法再移动窗口（原生限制）——内容本身是居中的。
+    static func runModalCentered(_ alert: NSAlert) -> NSApplication.ModalResponse {
+        alert.window.center()
+        return alert.runModal()
+    }
+
     /// 单一按钮的信息弹窗（检查更新的"已是最新/失败/未配置"结果）。
-    /// 原生 NSAlert 在 macOS 13+ 图标和文字都是居中显示的，窗口也居中。
+    /// 原生 NSAlert，内容居中，窗口屏幕居中。
     private func showSimpleDialog(_ text: String) {
         let alert = NSAlert()
         alert.icon = NSApp.applicationIconImage
         alert.messageText = "检查更新"
         alert.informativeText = text
         alert.addButton(withTitle: "好")
-        alert.window.center()
-        alert.runModal()
+        Self.runModalCentered(alert)
     }
 
-    /// 发现新版本时的独立弹窗（原生 NSAlert，图标与文字居中，窗口居中，不打开主窗口）。
+    /// 发现新版本时的独立弹窗（原生 NSAlert，内容居中，窗口屏幕居中，不打开主窗口）。
     /// messageText（加粗标题）= 当前版本；informativeText（正常正文）= 发现新版本。
     private func promptUpdateDialog(_ info: Updater.ReleaseInfo) {
         let alert = NSAlert()
@@ -1059,8 +1065,7 @@ final class AppState: NSObject, ObservableObject {
         alert.informativeText = "发现新版本 \(info.tag)"
         alert.addButton(withTitle: "下载并更新")
         alert.addButton(withTitle: "以后再说")
-        alert.window.center()
-        if alert.runModal() == .alertFirstButtonReturn {
+        if Self.runModalCentered(alert) == .alertFirstButtonReturn {
             downloadUpdate()
         }
     }
