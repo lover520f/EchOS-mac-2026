@@ -5,6 +5,17 @@
 
 ---
 
+## v1.1.8
+
+在 v1.1.7 基础上改进：
+
+- 修复：ECH 公钥查询（DoH）在 IPv6 路由不通的网络里失败——
+  `cloudflare-dns.com` 这类双栈 DoH 会先解析出 IPv6 地址，连接后
+  读数据直接被 reset（connection reset by peer）。现在 DoH / UDP DNS
+  拨号一律 **IPv4 优先**，IPv4 不可达时才退回 IPv6，国内网络更稳
+- （注意：若 DoH 服务器本身被墙，例如 `cloudflare-dns.com` 在国内
+  无法直连，请使用内置的国内 DoH，如 `dns.alidns.com/dns-query`）
+
 ## v1.1.7
 
 在 v1.1.6 基础上改进：

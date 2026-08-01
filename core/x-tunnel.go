@@ -1149,6 +1149,33 @@ func dialPhysDNS(ctx context.Context, network, server string, control func(strin
 	return d.DialContext(ctx, network, server)
 }
 
+// dialPhysicalIPv4First 拨号时优先走 IPv4，IPv6 失败/不可达时才退回。
+//
+// 双栈主机名（如 cloudflare-dns.com 同时有 A / AAAA 记录）在 IPv6 路由
+// 不通的网络里，直接按默认顺序拨号会先连 IPv6 地址——TCP 可能连上但
+// 读到数据时被对端 reset（connection reset by peer），DoH / UDP DNS
+// 查询就失败了。先强制解析 A 记录拨 IPv4，能绕开这类"半坏"的 IPv6 链路。
+func dialPhysicalIPv4First(dialer *net.Dialer, ctx context.Context, network, addr string) (net.Conn, error) {
+	// 纯 IP 字面量：不涉及解析，保持原样（IPv6 字面量也能拨）。
+	if host, _, err := net.SplitHostPort(addr); err == nil {
+		if ip := net.ParseIP(host); ip != nil {
+			return dialer.DialContext(ctx, network, addr)
+		}
+	}
+	// 主机名：先尝试强制 IPv4 地址族（tcp4/udp4 只解析 A 记录）。
+	if strings.HasPrefix(network, "tcp") {
+		if conn, err := dialer.DialContext(ctx, "tcp4", addr); err == nil {
+			return conn, nil
+		}
+	} else if strings.HasPrefix(network, "udp") {
+		if conn, err := dialer.DialContext(ctx, "udp4", addr); err == nil {
+			return conn, nil
+		}
+	}
+	// IPv4 不可达时退回默认（允许 IPv6）。
+	return dialer.DialContext(ctx, network, addr)
+}
+
 func newPhysicalNetDialer(timeout time.Duration) *net.Dialer {
 	control := func(network, address string, rawC syscall.RawConn) error {
 		return bindSocketToPhysNIC(network, address, rawC)
@@ -1210,7 +1237,7 @@ func queryDNSUDP(domain, dnsServer string) (string, error) {
 	query := buildDNSQuery(domain, typeHTTPS)
 
 	dialer := newPhysicalNetDialer(2 * time.Second)
-	conn, err := dialer.DialContext(context.Background(), "udp", dnsServer)
+	conn, err := dialPhysicalIPv4First(dialer, context.Background(), "udp", dnsServer)
 	if err != nil {
 		return "", fmt.Errorf("连接 DNS 服务器失败: %v", err)
 	}
@@ -1253,7 +1280,9 @@ func queryDoH(domain, dohURL string) (string, error) {
 	dialer := newPhysicalNetDialer(3 * time.Second)
 	transport := &http.Transport{
 		Proxy:               nil,
-		DialContext:         dialer.DialContext,
+		DialContext:         func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return dialPhysicalIPv4First(dialer, ctx, network, addr)
+		},
 		TLSHandshakeTimeout: 3 * time.Second,
 	}
 	defer transport.CloseIdleConnections()
