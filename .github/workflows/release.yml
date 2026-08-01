@@ -110,4 +110,4 @@ jobs:
           tag_name: ${{ steps.ver.outputs.TAG }}
           name: EchOS ${{ steps.ver.outputs.TAG }}
           body_path: RELEASE_BODY.md
-          files: build/EchOS-mac-*.dmg
+          files: EchOS-mac-*.dmg
