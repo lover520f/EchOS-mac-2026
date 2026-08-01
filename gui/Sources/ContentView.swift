@@ -411,7 +411,7 @@ struct ContentView: View {
                     app.runSelfCheck()
                 } label: {
                     Label(app.checking ? "检测中" : "自检", systemImage: "checkmark.seal.fill")
-                        .labelStyle(TintedIconLabelStyle(color: app.checking ? .secondary : .green))
+                        .labelStyle(TintedIconLabelStyle(color: selfCheckTint))
                 }
                 .buttonStyle(.plain)
                 // 任何状态都能点：代理运行时跑完整连通性检测，未启动时预检
@@ -716,6 +716,20 @@ struct ContentView: View {
     }
 
     // MARK: - 自检状态呈现
+
+    /// 自检按钮图标的颜色，跟状态灯（statusDotColor）保持一致：
+    /// 没测过是中性色，检测中置灰，通过才绿、失败才红。
+    /// 之前改成"不在检测就是绿"，结果一启动图标就绿着，自检记录却是空的，
+    /// 明摆着没跑过却装成通过的样子，误导。
+    private var selfCheckTint: Color {
+        if app.checking { return .secondary }
+        switch app.checkState {
+        case .idle:    return .accentColor
+        case .running: return .yellow
+        case .ok:      return .green
+        case .failed:  return .red
+        }
+    }
 
     private var statusDotColor: Color {
         if app.isStarting { return .yellow }
