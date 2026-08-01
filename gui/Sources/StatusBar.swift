@@ -145,7 +145,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         }
     }
 
-    @objc private func toggleProxy() { state?.toggle() }
+    @objc private func toggleProxy() { Task { await state?.toggle() } }
 
     @objc private func toggleDockIcon() {
         guard let state else { return }

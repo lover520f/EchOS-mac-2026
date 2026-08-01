@@ -42,6 +42,9 @@ final class AppState: NSObject, ObservableObject {
     private var process: Process?
     private var stdoutPipe: Pipe?
     private let maxLogLines = 2000
+    /// 系统代理的接管/还原/查询都在这个 actor 里跑（后台串行），
+    /// 否则同步跑几十个 networksetup 子进程会把主线程卡成风火轮。
+    private let proxyWorker = SystemProxyWorker()
 
     /// 本次运行实际使用的本地端口（自动挑选，界面上不需要用户填）
     private(set) var activeSocks: (host: String, port: Int)?
@@ -79,9 +82,16 @@ final class AppState: NSObject, ObservableObject {
         }
 
         if SystemProxy.isActive {
-            _ = SystemProxy.restore()
-            proxyTakenOver = false
-            pendingLogs.append("[系统代理] 上次未正常退出，已把系统代理还原回你原来的设置")
+            // 还原放后台跑：接管时跑了几十个 networksetup 子进程，启动时
+            // 在主线程同步跑一遍，App 刚打开就在 Dock 里卡成风火轮。
+            // proxyWorker 是 actor，串行排队，和之后的接管不会打架。
+            pendingLogs.append("[系统代理] 上次未正常退出，正在还原系统代理…")
+            Task {
+                let warnings = await proxyWorker.restore()
+                warnings.forEach { log("[系统代理] \($0)") }
+                proxyTakenOver = false
+                log("[系统代理] 已把系统代理还原回你原来的设置")
+            }
             recovered = true
         }
 
@@ -257,10 +267,10 @@ final class AppState: NSObject, ObservableObject {
     /// 会频繁断网、还可能在用户还没填完时就重启。所以编辑只标记
     /// rulesDirty，让用户改完统一点「立即重启」。模式是单选控件，
     /// 点一次就完成，才适合自动重启。别把它们"统一"了。
-    func applyRules() {
+    func applyRules() async {
         guard isRunning else { rulesDirty = false; return }
         log("[系统] 应用新的分流规则，正在重启代理（会短暂断开）…")
-        stop()
+        await stop()
         start()
         rulesDirty = false
     }
@@ -579,7 +589,7 @@ final class AppState: NSObject, ObservableObject {
         }
     }
 
-    func stop() {
+    func stop() async {
         isStarting = false
         if proxyTakenOver { disableSystemProxy() }
         guard let p = process else { isRunning = false; return }
@@ -589,13 +599,14 @@ final class AppState: NSObject, ObservableObject {
         // 等它真的退出再往下走。SIGTERM 只是"请你退出"，进程还要一点时间收尾；
         // 之前发完信号就立刻返回，用户切换模式时紧接着点启动，
         // 就会撞上尚未释放的端口，报"端口 30000 已被占用"。
+        // 睡眠用 Task.sleep，不占主线程 —— 不然用户点「停止」就卡出风火轮。
         let deadline = Date().addingTimeInterval(3)
         while p.isRunning && Date() < deadline {
-            usleep(50_000)
+            try? await Task.sleep(nanoseconds: 50_000_000)
         }
         if p.isRunning {
             kill(p.processIdentifier, SIGKILL)
-            usleep(200_000)
+            try? await Task.sleep(nanoseconds: 200_000_000)
         }
 
         stdoutPipe?.fileHandleForReading.readabilityHandler = nil
@@ -610,7 +621,7 @@ final class AppState: NSObject, ObservableObject {
         // SOCKS 和 HTTP 两个都要等：只等前者的话，内核仍会因为后者起不来。
         for ep in [activeSocks, activeHTTP].compactMap({ $0 }) {
             for _ in 0..<40 where !PortPicker.isFree(ep.port) {
-                usleep(50_000)
+                try? await Task.sleep(nanoseconds: 50_000_000)
             }
         }
 
@@ -621,18 +632,18 @@ final class AppState: NSObject, ObservableObject {
         refreshStatusText()
     }
 
-    func toggle() { (isRunning || isStarting) ? stop() : start() }
+    func toggle() async { (isRunning || isStarting) ? await stop() : start() }
 
     /// 切换分流模式。运行中切换会自动重启内核 ——
     /// 分流规则是启动时作为命令行参数传给内核的，改了不重启根本不会生效；
     /// 要么禁止运行中切换（用户会觉得莫名其妙），要么切了就替他重启。
-    func switchRouteMode(_ mode: RouteMode) {
+    func switchRouteMode(_ mode: RouteMode) async {
         guard selected?.routeMode != mode else { return }
         update { $0.routeMode = mode }
 
         guard isRunning else { return }
         log("[系统] 分流模式已切换为「\(mode.title)」，正在重启代理（会短暂断开）…")
-        stop()
+        await stop()
         start()
     }
 
@@ -708,15 +719,22 @@ final class AppState: NSObject, ObservableObject {
     // MARK: - 系统代理
 
     func enableSystemProxy() {
-        do {
-            let warnings = try SystemProxy.enable(socks: activeSocks, http: activeHTTP)
-            warnings.forEach { log("[系统代理] \($0)") }
-            proxyTakenOver = true
-            log("[系统代理] 浏览器等程序已自动走本工具")
-        } catch {
-            log("[系统代理] 自动设置失败：\(error.localizedDescription)")
+        // 先标记再异步接管：万一接管还没跑完用户就点停止，stop() 里依然能
+        // 看到 proxyTakenOver=true 而去还原系统代理，不会把代理漏在系统里。
+        proxyTakenOver = true
+        let socks = activeSocks.map { SystemProxyWorker.Endpoint(host: $0.host, port: $0.port) }
+        let http = activeHTTP.map { SystemProxyWorker.Endpoint(host: $0.host, port: $0.port) }
+        Task {
+            do {
+                let warnings = try await proxyWorker.enable(socks: socks, http: http)
+                warnings.forEach { log("[系统代理] \($0)") }
+                log("[系统代理] 浏览器等程序已自动走本工具")
+            } catch {
+                proxyTakenOver = false
+                log("[系统代理] 自动设置失败：\(error.localizedDescription)")
+            }
+            refreshProxySummary()
         }
-        refreshProxySummary()
     }
 
     /// 切换「自动设置系统代理」。
@@ -740,16 +758,20 @@ final class AppState: NSObject, ObservableObject {
     }
 
     func disableSystemProxy() {
-        let warnings = SystemProxy.restore()
-        warnings.forEach { log("[系统代理] \($0)") }
         proxyTakenOver = false
-        log("[系统代理] 已还原为你原来的设置")
-        refreshProxySummary()
+        Task {
+            let warnings = await proxyWorker.restore()
+            warnings.forEach { log("[系统代理] \($0)") }
+            log("[系统代理] 已还原为你原来的设置")
+            refreshProxySummary()
+        }
     }
 
     func refreshProxySummary() {
-        systemProxySummary = SystemProxy.currentSummary()
-        refreshStatusText()
+        Task {
+            systemProxySummary = await proxyWorker.summary()
+            refreshStatusText()
+        }
     }
 
     func refreshStatusText() {
@@ -891,11 +913,11 @@ final class AppState: NSObject, ObservableObject {
         }
     }
 
-    func restoreConfigLocal(from url: URL) {
+    func restoreConfigLocal(from url: URL) async {
         do {
             let data = try Data(contentsOf: url)
             let cfg = try JSONDecoder().decode(AppConfig.self, from: data)
-            applyRestored(cfg)
+            await applyRestored(cfg)
         } catch {
             log("[系统] 还原失败：文件不是有效的配置备份")
         }
@@ -903,10 +925,10 @@ final class AppState: NSObject, ObservableObject {
 
     /// 把一份配置应用到当前 App。还原期间先停代理，避免配置和连接对不上。
     /// 还原前逐台校验，参数不完整的服务器直接跳过，不让坏数据污染整体。
-    private func applyRestored(_ cfg: AppConfig) {
+    private func applyRestored(_ cfg: AppConfig) async {
         if isRunning || isStarting {
             log("[系统] 还原配置，先停止代理…")
-            stop()
+            await stop()
         }
         var c = cfg
         var dropped = 0
@@ -996,7 +1018,7 @@ final class AppState: NSObject, ObservableObject {
         do {
             let data = try await WebDAVClient.download(from: url, username: w.username, password: password)
             let cfg = try JSONDecoder().decode(AppConfig.self, from: data)
-            applyRestored(cfg)
+            await applyRestored(cfg)
         } catch {
             log("[系统] WebDAV 还原失败：\(error.localizedDescription)")
         }

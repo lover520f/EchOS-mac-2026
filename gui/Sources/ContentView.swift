@@ -140,7 +140,7 @@ struct ContentView: View {
         }
         .alert("从本地文件还原配置？", isPresented: $confirmRestoreLocal, presenting: pendingRestoreURL) { url in
             Button("取消", role: .cancel) {}
-            Button("还原", role: .destructive) { app.restoreConfigLocal(from: url) }
+            Button("还原", role: .destructive) { Task { await app.restoreConfigLocal(from: url) } }
         } message: { _ in
             Text("当前全部配置（服务器、分流规则、偏好）都会被这份备份覆盖。\n代理运行中会先停止。")
         }
@@ -438,7 +438,7 @@ struct ContentView: View {
                     ModeSegment(
                         selection: Binding(
                             get: { app.selected?.routeMode ?? .bypassCN },
-                            set: { v in app.switchRouteMode(v) }
+                            set: { v in Task { await app.switchRouteMode(v) } }
                         ),
                         disabled: false
                     )
@@ -642,7 +642,7 @@ struct ContentView: View {
                     .font(.system(size: 11)).foregroundColor(.orange)
                 Text("规则已保存，重启代理才生效")
                     .font(.system(size: 11)).foregroundColor(.orange)
-                Button("立即重启") { app.applyRules() }
+                Button("立即重启") { Task { await app.applyRules() } }
                     .controlSize(.small)
             } else {
                 Image(systemName: "checkmark.circle.fill")
@@ -683,7 +683,7 @@ struct ContentView: View {
                 .keyboardShortcut(.return, modifiers: .command)
 
                 persistentTint(.red, isActive: app.isRunning || app.isStarting) {
-                    app.stop()
+                    Task { await app.stop() }
                 } label: {
                     Label("停止代理", systemImage: "stop.fill")
                         .frame(width: 84, height: 30)

@@ -242,3 +242,29 @@ enum SystemProxy {
         return parts.isEmpty ? "未启用" : parts.joined(separator: " / ")
     }
 }
+
+/// 把 networksetup 的多次子进程调用串行化、丢到后台执行。
+///
+/// AppState（@MainActor）直接同步调 SystemProxy 时，接管/还原要一次跑几十个
+/// 子进程（3 个网络服务 × 每服务 4~8 次），主线程被卡几秒 —— 用户看到的就是
+/// 风火轮。actor 的 executor 天然串行，接管/还原不会交叉，也不会占主线程。
+actor SystemProxyWorker {
+    struct Endpoint: Sendable, Equatable {
+        var host: String
+        var port: Int
+    }
+
+    func enable(socks: Endpoint?, http: Endpoint?) throws -> [String] {
+        try SystemProxy.enable(
+            socks: socks.map { (host: $0.host, port: $0.port) },
+            http: http.map { (host: $0.host, port: $0.port) })
+    }
+
+    func restore() -> [String] {
+        SystemProxy.restore()
+    }
+
+    func summary() -> String {
+        SystemProxy.currentSummary()
+    }
+}
