@@ -411,11 +411,13 @@ struct ContentView: View {
                     app.runSelfCheck()
                 } label: {
                     Label(app.checking ? "检测中" : "自检", systemImage: "checkmark.seal.fill")
-                        .labelStyle(TintedIconLabelStyle(color: app.isRunning && !app.checking ? .green : .secondary))
+                        .labelStyle(TintedIconLabelStyle(color: app.checking ? .secondary : .green))
                 }
                 .buttonStyle(.plain)
-                .disabled(!app.isRunning || app.checking)
-                .help("手动跑一次并把明细写进日志。\n启动代理后会自动静默自检一次，结果看状态灯。")
+                // 任何状态都能点：代理运行时跑完整连通性检测，未启动时预检
+                // 服务端/DoH 可达性（人工确认配置能不能用），只有检测进行中置灰
+                .disabled(app.checking)
+                .help("代理运行时跑完整连通性检测（本地端口 + 国内/国外网站）；\n未启动时预检服务端和 DoH 可达性，确认配置能用再启动。")
             }
         }
     }

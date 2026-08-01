@@ -665,15 +665,39 @@ final class AppState: NSObject, ObservableObject {
     /// 跑一轮连通性自检。
     /// - silent: 静默模式（启动后自动跑的那次）只更新状态灯，不往日志里写；
     ///   手动点按钮才写日志，那时用户是主动来看细节的。
+    /// 代理未运行时也能点：改成预检服务端 / DoH 可达性，人工确认这套配置
+    /// 在启动前"能不能用"——不必先启动一趟才知道连不上。
     func runSelfCheck(silent: Bool = false) {
-        guard (isRunning || isStarting), let socks = activeSocks, let mode = selected?.routeMode else {
-            if !silent { log("[自检] 请先启动代理") }
-            return
-        }
         guard !checking else { return }
         checking = true
         checkState = .running
         if !silent { log("[自检] 开始检测…") }
+
+        // 代理没在跑：没有本地端口可测，走预检分支。
+        guard (isRunning || isStarting), let socks = activeSocks, let mode = selected?.routeMode else {
+            guard let cfg = selected else {
+                checking = false
+                if !silent { log("[自检] 请先添加并选中服务器") }
+                return
+            }
+            if let err = cfg.validate() {
+                checking = false
+                checkState = .failed(err)
+                if !silent { log("[自检] ✗ 配置不完整：\(err)") }
+                return
+            }
+            if !silent { log("[自检] 代理未启动，预检服务端连通性…") }
+            Task { @MainActor in
+                // 至少让"检测中"显示 800 毫秒，灯一闪而过等于没有反馈
+                async let probe = SelfCheck.runPreflight(config: cfg)
+                async let minShow: Void = Task.sleep(nanoseconds: 800_000_000)
+                let results = await probe
+                _ = try? await minShow
+                presentCheckResults(results, silent: silent)
+                checking = false
+            }
+            return
+        }
 
         Task { @MainActor in
             async let probe = SelfCheck.run(socks: socks, mode: mode)
@@ -682,37 +706,43 @@ final class AppState: NSObject, ObservableObject {
             async let minShow: Void = Task.sleep(nanoseconds: 800_000_000)
             let results = await probe
             _ = try? await minShow
-            if !silent {
-                for r in results {
-                    log("[自检] \(r.ok ? "✓" : "✗") \(r.title)：\(r.note)")
-                }
-            }
-
-            let failed = results.filter { !$0.ok }
-            if failed.isEmpty {
-                // 摘要里带上延迟，一眼能看出快慢
-                let detail = results.map { "\($0.title)：\($0.note)" }.joined(separator: "\n")
-                checkState = .ok(detail)
-                // 静默模式（启动后自动跑的那次）：通过的结果也进自检记录，
-                // 只记失败的话，看不出平时延迟是多少，也就没法判断"今天怎么变慢了"。
-                // 手动点按钮时结果已经在上面统一打过了，这里再打就是重复。
-                if silent {
-                    for r in results {
-                        log("[自检] ✓ \(r.title)：\(r.note)")
-                    }
-                }
-            } else {
-                let detail = failed.map { "\($0.title)：\($0.note)" }.joined(separator: "\n")
-                checkState = .failed(detail)
-                // 静默模式下失败无论如何都记一笔，而且要带上原因 ——
-                // 只写"某项未通过"等于没说，用户照样不知道该查什么。
-                if silent {
-                    for f in failed {
-                        log("[自检] ✗ \(f.title)：\(f.note)")
-                    }
-                }
-            }
+            presentCheckResults(results, silent: silent)
             checking = false
+        }
+    }
+
+    /// 自检结果的统一呈现：写日志（非静默）+ 更新状态灯（ok/failed 摘要）。
+    /// 非静默时结果只打一遍；静默模式不打扰，失败项也单独记一笔。
+    @MainActor
+    private func presentCheckResults(_ results: [SelfCheck.Result], silent: Bool) {
+        if !silent {
+            for r in results {
+                log("[自检] \(r.ok ? "✓" : "✗") \(r.title)：\(r.note)")
+            }
+        }
+
+        let failed = results.filter { !$0.ok }
+        if failed.isEmpty {
+            // 摘要里带上延迟，一眼能看出快慢
+            let detail = results.map { "\($0.title)：\($0.note)" }.joined(separator: "\n")
+            checkState = .ok(detail)
+            // 静默模式（启动后自动跑的那次）：通过的结果也进自检记录，
+            // 只记失败的话，看不出平时延迟是多少，也就没法判断"今天怎么变慢了"。
+            if silent {
+                for r in results {
+                    log("[自检] ✓ \(r.title)：\(r.note)")
+                }
+            }
+        } else {
+            let detail = failed.map { "\($0.title)：\($0.note)" }.joined(separator: "\n")
+            checkState = .failed(detail)
+            // 静默模式下失败无论如何都记一笔，而且要带上原因 ——
+            // 只写"某项未通过"等于没说，用户照样不知道该查什么。
+            if silent {
+                for f in failed {
+                    log("[自检] ✗ \(f.title)：\(f.note)")
+                }
+            }
         }
     }
 
