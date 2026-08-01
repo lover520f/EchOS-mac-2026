@@ -495,10 +495,12 @@ final class AppState: NSObject, ObservableObject {
         rulesDirty = false
         refreshStatusText()
 
-        // 立即开始自检，不设固定等待。如果内核还没就绪，最多重试 4 次
+        // 启动流程：先等内核监听端口就绪（约 5 秒上限）→ 立刻接管系统代理。
+        // 内核是"隧道建好才监听端口"，所以端口就绪 ≈ 隧道已通，
+        // 不必再等完整的 HTTP 探针 —— 探针放后台跑，只更新自检状态，不阻塞接管。
         isStarting = true
         checkState = .running
-        log("[系统] 正在检测代理连通性…")
+        log("[系统] 正在等待代理端口就绪…")
         Task { @MainActor in
             guard let socks = self.activeSocks, let mode = self.selected?.routeMode else {
                 self.checkState = .idle
@@ -507,46 +509,55 @@ final class AppState: NSObject, ObservableObject {
                 return
             }
 
-            var lastResults: [SelfCheck.Result] = []
-            var succeeded = false
-
-            for attempt in 1...5 {
+            // 1) 等本地端口开始监听（内核起来、隧道就绪才监听）。
+            //    上限 10 秒，和内核 WaitForChannelReady(10s) 对齐：慢隧道也能等到。
+            var portReady = false
+            for attempt in 1...10 {
                 guard self.isStarting, self.process?.isRunning == true else {
                     self.isStarting = false
                     return
                 }
-
-                self.checkState = .running
-                lastResults = await SelfCheck.run(socks: socks, mode: mode)
-                let failed = lastResults.filter { !$0.ok }
-
-                if failed.isEmpty {
-                    succeeded = true
+                if !PortPicker.isFree(socks.port) {
+                    portReady = true
                     break
                 }
-
-                if attempt < 5 {
-                    self.log("[系统] 内核尚未就绪，\(2)秒后重试（第 \(attempt) 次）…")
-                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                if attempt < 10 {
+                    self.log("[系统] 代理端口尚未就绪，1 秒后重试（第 \(attempt) 次）…")
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)
                 }
             }
 
-            for r in lastResults {
-                self.log("[自检] \(r.ok ? "✓" : "✗") \(r.title)：\(r.note)")
-            }
-
-            if succeeded {
-                let detail = lastResults.map { "\($0.title)：\($0.note)" }.joined(separator: "\n")
-                self.checkState = .ok(detail)
-            } else {
-                let detail = lastResults.filter { !$0.ok }.map { "\($0.title)：\($0.note)" }.joined(separator: "\n")
-                self.checkState = .failed(detail)
-            }
-
-            self.isRunning = true
             self.isStarting = false
+
+            if !portReady {
+                // 端口一直没就绪：内核可能启动失败
+                self.checkState = .failed("本地代理端口 \(socks.port) 未监听，内核可能未启动成功")
+                self.log("[系统] 代理端口未就绪，内核可能启动失败")
+                return
+            }
+
+            // 2) 端口就绪 → 立即标记运行中并接管系统代理
+            self.isRunning = true
+            self.log("[系统] 代理端口已就绪，正在接管系统代理…")
             if self.config.autoSystemProxy {
                 self.enableSystemProxy()
+            }
+
+            // 3) 后台跑连通性探针，只更新自检状态
+            Task { @MainActor in
+                let results = await SelfCheck.run(socks: socks, mode: mode)
+                let failed = results.filter { !$0.ok }
+                for r in results {
+                    self.log("[自检] \(r.ok ? "✓" : "✗") \(r.title)：\(r.note)")
+                }
+                if failed.isEmpty {
+                    let detail = results.map { "\($0.title)：\($0.note)" }.joined(separator: "\n")
+                    self.checkState = .ok(detail)
+                } else {
+                    let detail = failed.map { "\($0.title)：\($0.note)" }.joined(separator: "\n")
+                    self.checkState = .failed(detail)
+                    self.log("[系统] 隧道自检未完全通过，请查看上方运行日志")
+                }
             }
         }
     }

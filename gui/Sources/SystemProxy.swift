@@ -7,10 +7,16 @@ struct ProxyBackup: Codable {
         var server: String = ""
         var port: Int = 0
     }
+    /// PAC 自动代理（v2rayN 等会用 .pac URL 而非具体端口，必须单独备份还原）
+    struct PacEntry: Codable {
+        var enabled: Bool = false
+        var url: String = ""
+    }
     var service: String
     var web: Entry = Entry()        // HTTP
     var secureWeb: Entry = Entry()  // HTTPS
     var socks: Entry = Entry()      // SOCKS
+    var pac: PacEntry = PacEntry()  // 自动代理（PAC）
 }
 
 /// 用 networksetup 接管 / 还原 macOS 系统代理，替代 v2rayN 的「自动配置系统代理」。
@@ -76,6 +82,22 @@ enum SystemProxy {
         return e
     }
 
+    private static func parsePac(_ text: String) -> ProxyBackup.PacEntry {
+        var e = ProxyBackup.PacEntry()
+        for line in text.split(separator: "\n") {
+            let parts = line.split(separator: ":", maxSplits: 1).map {
+                $0.trimmingCharacters(in: .whitespaces)
+            }
+            guard parts.count == 2 else { continue }
+            switch parts[0] {
+            case "Enabled": e.enabled = (parts[1].lowercased() == "yes")
+            case "URL":     e.url = parts[1]
+            default: break
+            }
+        }
+        return e
+    }
+
     static func readBackup() throws -> [ProxyBackup] {
         var result: [ProxyBackup] = []
         for svc in try networkServices() {
@@ -83,6 +105,7 @@ enum SystemProxy {
             b.web = parseEntry((try? run(["-getwebproxy", svc])) ?? "")
             b.secureWeb = parseEntry((try? run(["-getsecurewebproxy", svc])) ?? "")
             b.socks = parseEntry((try? run(["-getsocksfirewallproxy", svc])) ?? "")
+            b.pac = parsePac((try? run(["-getautoproxyurl", svc])) ?? "")
             result.append(b)
         }
         return result
@@ -132,6 +155,9 @@ enum SystemProxy {
                     try run(["-setsecurewebproxy", svc, h.host, String(h.port)])
                     try run(["-setsecurewebproxystate", svc, "on"])
                 }
+                // 接管期间关闭 PAC 自动代理，避免它和 socks/http 抢浏览器流量
+                // （v2rayN 的 PAC 在这里会被临时让位，还原时再恢复）。
+                try run(["-setautoproxystate", svc, "off"])
             } catch {
                 warnings.append("网络服务「\(svc)」设置失败：\(error.localizedDescription)")
             }
@@ -190,6 +216,16 @@ enum SystemProxy {
             apply(b.socks, set: "-setsocksfirewallproxy", state: "-setsocksfirewallproxystate")
             apply(b.web, set: "-setwebproxy", state: "-setwebproxystate")
             apply(b.secureWeb, set: "-setsecurewebproxy", state: "-setsecurewebproxystate")
+
+            // PAC 自动代理单独处理：只有 URL 和开关两样东西。
+            do {
+                if !b.pac.url.isEmpty {
+                    try run(["-setautoproxyurl", b.service, b.pac.url])
+                }
+                try run(["-setautoproxystate", b.service, b.pac.enabled ? "on" : "off"])
+            } catch {
+                warnings.append("还原「\(b.service)」自动代理失败：\(error.localizedDescription)")
+            }
         }
         isActive = false
         return warnings

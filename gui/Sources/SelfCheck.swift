@@ -66,7 +66,7 @@ enum SelfCheck {
         guard portOK else { return results }
 
         // 2) 国内站点：规则模式下应该直连，全局模式下走隧道
-        let (cnOK, cnCost, cnNote) = await probeTwice(via: socks, url: "https://www.baidu.com", timeout: 15)
+        let (cnOK, cnCost, cnNote) = await probeTwice(via: socks, url: "https://www.baidu.com", timeout: 8)
         results.append(Result(
             title: "国内网站（百度）",
             ok: cnOK,
@@ -78,7 +78,7 @@ enum SelfCheck {
         do {
             let (foreignOK, fCost, fNote) = await probeTwice(via: socks,
                                                              url: "https://www.gstatic.com/generate_204",
-                                                             timeout: 15)
+                                                             timeout: 8)
             results.append(Result(
                 title: "国外网站（经隧道）",
                 ok: foreignOK,
