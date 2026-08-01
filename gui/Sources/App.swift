@@ -94,6 +94,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func showUpdateCompleteDialog(version: String) {
         let alert = NSAlert()
+        alert.icon = NSApp.applicationIconImage
         alert.messageText = "更新完成"
         alert.informativeText = "已升级到 v\(version)。\n新版本已替换 /Applications 里的 EchOS.app。"
         alert.addButton(withTitle: "好")

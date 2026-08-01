@@ -1039,21 +1039,23 @@ final class AppState: NSObject, ObservableObject {
     }
 
     /// 单一按钮的信息弹窗（检查更新的"已是最新/失败/未配置"结果）。
+    /// 原生 NSAlert 在 macOS 13+ 图标和文字都是居中显示的。
     private func showSimpleDialog(_ text: String) {
         let alert = NSAlert()
+        alert.icon = NSApp.applicationIconImage
         alert.messageText = "检查更新"
         alert.informativeText = text
         alert.addButton(withTitle: "好")
         alert.runModal()
     }
 
-    /// 发现新版本时的独立弹窗（NSAlert）。不打开主窗口 ——
-    /// 菜单栏触发检查时窗口是隐藏的（关闭按钮只隐藏不销毁），
-    /// 这里不用 NSApp.activate，弹窗照常显示。
+    /// 发现新版本时的独立弹窗（原生 NSAlert，图标与文字居中，不打开主窗口）。
+    /// messageText（加粗标题）= 当前版本；informativeText（正常正文）= 发现新版本。
     private func promptUpdateDialog(_ info: Updater.ReleaseInfo) {
         let alert = NSAlert()
-        alert.messageText = "发现新版本 \(info.tag)"
-        alert.informativeText = "当前版本 \(Updater.localVersion)。\n新版将自动下载并替换 /Applications 里的 EchOS.app，替换后自动重启。"
+        alert.icon = NSApp.applicationIconImage
+        alert.messageText = "EchOS 版本：\(Updater.localVersion)"
+        alert.informativeText = "发现新版本 \(info.tag)"
         alert.addButton(withTitle: "下载并更新")
         alert.addButton(withTitle: "以后再说")
         if alert.runModal() == .alertFirstButtonReturn {
@@ -1099,6 +1101,8 @@ final class AppState: NSObject, ObservableObject {
     private var progressIndicator: NSProgressIndicator?
     /// 当前正在进行的 DMG 下载器（供取消）
     private var activeDownloader: DMGDownloader?
+    /// 发现新版本的更新弹窗面板（自定义布局）
+    private var updateDialogPanel: NSPanel?
 
     /// 点进度面板的「取消」：中断下载并关面板。
     @objc func cancelDownload() {
@@ -1273,3 +1277,4 @@ final class AppState: NSObject, ObservableObject {
         }
     }
 }
+
