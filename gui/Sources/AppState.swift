@@ -3,7 +3,7 @@ import SwiftUI
 import AppKit
 
 @MainActor
-final class AppState: ObservableObject {
+final class AppState: NSObject, ObservableObject {
     @Published var config: AppConfig
     @Published var isRunning = false {
         didSet { refreshStatusText() }
@@ -50,9 +50,11 @@ final class AppState: ObservableObject {
     /// 顶部状态条文字，例如「已连接 · 全局代理已开启」
     @Published var statusText: String = "已停止"
 
-    init() {
-        self.config = AppConfig.load()
-        committedIDs = Set(self.config.servers.map(\.id))
+    override init() {
+        let cfg = AppConfig.load()
+        self.config = cfg
+        super.init()
+        committedIDs = Set(cfg.servers.map(\.id))
         // 读进来时可能做过格式迁移（比如把 host:port 拆成两个字段），
         // 立刻回写一次让文件里也是新格式，免得迁移逻辑一直悬着。
         // 全新安装（还没有配置文件）就不写：保持零配置，等用户第一次操作再落盘。
@@ -1062,16 +1064,24 @@ final class AppState: ObservableObject {
     /// 下载新版 DMG 到 ~/Downloads，完成后自动替换 /Applications 里的旧版并重启。
     func downloadUpdate() {
         guard let info = updateInfo else { return }
+        showDownloadProgress()
         downloadProgress = 0
         updateStatus = "正在下载 \(info.dmgName ?? "新版本")…"
         log("[更新] 开始下载 \(info.dmgName ?? "")…")
-        Updater.downloadDMG(info) { [weak self] p in
+        let downloader = Updater.downloadDMG(info) { [weak self] p in
             self?.downloadProgress = p
             self?.updateStatus = String(format: "正在下载 %.0f%%…", p * 100)
+            self?.updateDownloadProgress(p)
         } finish: { [weak self] url in
             guard let self else { return }
+            let cancelled = self.activeDownloader?.isCancelled ?? false
+            self.activeDownloader = nil
+            self.hideDownloadProgress()
             self.downloadProgress = nil
-            if let url {
+            if cancelled {
+                self.updateStatus = "下载已取消"
+                self.log("[更新] 下载已取消")
+            } else if let url {
                 self.updateStatus = "下载完成，正在替换…"
                 self.log("[更新] 下载完成：\(url.path)")
                 self.performAutoUpdate(dmgURL: url)
@@ -1080,6 +1090,80 @@ final class AppState: ObservableObject {
                 self.log("[更新] 下载失败，请稍后重试")
             }
         }
+        activeDownloader = downloader
+    }
+
+    // MARK: - 下载进度面板（独立小窗，主窗口隐藏时也能看到进度）
+
+    private var progressPanel: NSPanel?
+    private var progressIndicator: NSProgressIndicator?
+    /// 当前正在进行的 DMG 下载器（供取消）
+    private var activeDownloader: DMGDownloader?
+
+    /// 点进度面板的「取消」：中断下载并关面板。
+    @objc func cancelDownload() {
+        activeDownloader?.cancel()
+        activeDownloader = nil
+        hideDownloadProgress()
+        downloadProgress = nil
+        updateStatus = "下载已取消"
+        log("[更新] 下载已取消")
+    }
+
+    /// 下载开始时弹出带进度条的小面板。
+    private func showDownloadProgress() {
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 380, height: 150),
+            styleMask: [.titled], backing: .buffered, defer: false
+        )
+        panel.title = "正在下载更新"
+        panel.level = .floating
+        panel.isFloatingPanel = true
+        panel.hidesOnDeactivate = false
+        panel.isReleasedWhenClosed = false
+
+        let label = NSTextField(labelWithString: "正在下载 \(updateInfo?.dmgName ?? "新版本")…")
+        label.font = .systemFont(ofSize: 13)
+        label.lineBreakMode = .byTruncatingMiddle
+
+        let indicator = NSProgressIndicator()
+        indicator.style = .bar
+        indicator.isIndeterminate = false
+        indicator.minValue = 0
+        indicator.maxValue = 1
+        indicator.doubleValue = 0
+
+        let cancelButton = NSButton(title: "取消", target: self, action: #selector(cancelDownload))
+        cancelButton.bezelStyle = .rounded
+        cancelButton.keyEquivalent = "\u{1b}"   // Esc 键取消
+        cancelButton.translatesAutoresizingMaskIntoConstraints = false
+
+        let stack = NSStackView(views: [label, indicator, cancelButton])
+        stack.orientation = .vertical
+        stack.spacing = 12
+        stack.edgeInsets = NSEdgeInsets(top: 18, left: 18, bottom: 18, right: 18)
+        indicator.translatesAutoresizingMaskIntoConstraints = false
+        indicator.widthAnchor.constraint(equalToConstant: 340).isActive = true
+        indicator.heightAnchor.constraint(equalToConstant: 20).isActive = true
+        cancelButton.widthAnchor.constraint(equalToConstant: 80).isActive = true
+        panel.contentView = stack
+
+        panel.center()
+        panel.orderFrontRegardless()
+        progressPanel = panel
+        progressIndicator = indicator
+    }
+
+    /// 下载进度回调：主线程更新进度条。
+    private func updateDownloadProgress(_ p: Double) {
+        progressIndicator?.doubleValue = p
+    }
+
+    /// 下载结束（成功/失败）关掉进度面板。
+    private func hideDownloadProgress() {
+        progressPanel?.orderOut(nil)
+        progressPanel = nil
+        progressIndicator = nil
     }
 
     /// 自动更新：挂载 DMG → 写更新脚本 → 退出主进程 → 脚本替换 /Applications 后重启。
@@ -1132,6 +1216,11 @@ final class AppState: ObservableObject {
         chmod +x "$APP/Contents/MacOS/EchOS" 2>/dev/null
         xattr -dr com.apple.quarantine "$APP" 2>/dev/null
         if [ -n "$MP" ]; then hdiutil detach "$MP" > /dev/null 2>&1; fi
+        # 写更新标记：新实例启动时据此只弹"更新完成"、不打开主窗口
+        VER=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Contents/Info.plist" 2>/dev/null)
+        MARKER="$HOME/Library/Application Support/EchOS/.updated-version"
+        mkdir -p "$HOME/Library/Application Support/EchOS"
+        echo "$VER" > "$MARKER"
         open "$APP"
         """
         let url = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("echos-update-\(Int(Date().timeIntervalSince1970)).sh")

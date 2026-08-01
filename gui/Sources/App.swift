@@ -43,6 +43,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // 刚被自动更新重启过（标记文件里是新版本号）→ 不弹主窗口，
+        // 只弹一个独立"更新完成"对话框，然后保持菜单栏常驻。
+        if let justUpdated = Self.consumeUpdatedMarker() {
+            // 窗口要等 SwiftUI 异步创建，延迟到出现后再隐藏 + 弹窗，
+            // 否则 didFinishLaunching 时窗口还不存在，隐藏了个寂寞。
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                NSApp.windows.first(where: { $0.contentView != nil })?.orderOut(nil)
+                self.showUpdateCompleteDialog(version: justUpdated)
+            }
+            return
+        }
+
         NSApp.activate(ignoringOtherApps: true)
         // SwiftUI 在纯 swiftc 构建（没有 Xcode 工程）下有时会把窗口收成很小一块，
         // 这里在主窗口出现后按内容需要的尺寸强制铺开并居中。
@@ -61,6 +73,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             win.titleVisibility = .hidden
             win.titlebarAppearsTransparent = true
         }
+    }
+
+    /// 更新完成标记文件路径：更新脚本替换完 /Applications 后写入，
+    /// 新实例启动时读到就只弹"更新完成"、不打开主窗口。
+    static var updatedMarkerURL: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("EchOS/.updated-version", isDirectory: false)
+    }
+
+    /// 读取并删除更新标记。标记里的版本号等于当前版本才算数（防止旧标记残留误弹）。
+    private static func consumeUpdatedMarker() -> String? {
+        let url = updatedMarkerURL
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+        try? FileManager.default.removeItem(at: url)
+        let v = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let current = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
+        return v == current ? v : nil
+    }
+
+    private func showUpdateCompleteDialog(version: String) {
+        let alert = NSAlert()
+        alert.messageText = "更新完成"
+        alert.informativeText = "已升级到 v\(version)。\n新版本已替换 /Applications 里的 EchOS.app。"
+        alert.addButton(withTitle: "好")
+        alert.runModal()
     }
 
     /// ContentView 算出的内容所需高度。窗口手动缩放时不能比它矮，

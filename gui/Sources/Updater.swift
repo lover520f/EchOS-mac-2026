@@ -113,14 +113,17 @@ enum Updater {
     }
 
     /// 下载 DMG 到 ~/Downloads。progress 0~1、finish(destURL) 都在主线程回调。
+    /// 返回下载器，调用方可 cancel() 中断下载（isCancelled 置位）。
+    @discardableResult
     static func downloadDMG(_ info: ReleaseInfo,
                             progress: @escaping (Double) -> Void,
-                            finish: @escaping (URL?) -> Void) {
-        guard let dmgURL = info.dmgURL else { finish(nil); return }
+                            finish: @escaping (URL?) -> Void) -> DMGDownloader {
+        let downloader = DMGDownloader()
+        guard let dmgURL = info.dmgURL else { finish(nil); return downloader }
         let dest = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first!
             .appendingPathComponent(info.dmgName ?? "EchOS-mac-\(info.version)-universal-x64.dmg")
-        let downloader = DMGDownloader()
         downloader.start(from: dmgURL, to: dest, progress: progress, finish: finish)
+        return downloader
     }
 
     /// 挂载 DMG（nobrowse，不弹出 Finder 窗口），返回挂载点；失败返回 nil。
@@ -248,6 +251,15 @@ final class DMGDownloader: NSObject, URLSessionDownloadDelegate {
     private var dest: URL?
     private var onProgress: ((Double) -> Void)?
     private var onFinish: ((URL?) -> Void)?
+    /// 用户主动取消置位，供 finish 回调区分"取消"和"失败"。
+    private(set) var isCancelled = false
+
+    /// 中断下载：会话取消后 didCompleteWithError 会回调 finish(nil)。
+    func cancel() {
+        isCancelled = true
+        task?.cancel()
+        session?.invalidateAndCancel()
+    }
 
     func start(from url: URL,
                to dest: URL,
