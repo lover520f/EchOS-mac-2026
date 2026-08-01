@@ -69,11 +69,6 @@ done
 if [ -f "$ROOT/gui/AppIcon.icns" ]; then
   cp "$ROOT/gui/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 fi
-# 菜单栏两态图标
-for m in menubar-off menubar-on; do
-  [ -f "$ROOT/assets/menubar/$m.png" ] && cp "$ROOT/assets/menubar/$m.png" "$APP/Contents/Resources/$m.png"
-  [ -f "$ROOT/assets/menubar/$m@2x.png" ] && cp "$ROOT/assets/menubar/$m@2x.png" "$APP/Contents/Resources/$m@2x.png"
-done
 # 本地临时签名：不签名的话 macOS 会直接拒绝运行
 codesign --force --deep --sign - "$APP" 2>/dev/null || echo "    （签名跳过，不影响本机使用）"
 

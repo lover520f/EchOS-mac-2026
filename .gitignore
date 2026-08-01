@@ -1,6 +1,11 @@
 # Build output
 build/
 
+# 内核编译产物（build.sh 只在 build/ 里产出；直接 go build 会落在 core/）
+core/x-tunnel
+core/x-tunnel-*
+core/*.test
+
 # macOS
 .DS_Store
 

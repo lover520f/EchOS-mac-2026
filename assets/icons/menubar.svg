@@ -1,8 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
-  <g fill="none" stroke="#000" stroke-linecap="round" stroke-linejoin="round">
-    <!-- 云轮廓：粗描边，占满画布，小尺寸下靠这条轮廓立住 -->
-    <path d="M 96 372 A 62 62 0 0 1 106 250 A 96 96 0 0 1 278 208 A 75 75 0 0 1 390 268 A 54 54 0 0 1 387 372 Z" stroke-width="42"/>
-    <!-- 只保留一道信号，两道在 16px 下会粘成一团 -->
-    <path d="M 356 128 A 76 76 0 0 1 432 128" stroke-width="40" transform="rotate(35 394 128)"/>
-  </g>
-</svg>

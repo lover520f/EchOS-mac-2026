@@ -158,7 +158,7 @@ echos/
 │   │   └── ...
 │   ├── Info.plist
 │   └── AppIcon.icns
-├── assets/                # 分流数据（构建前下载）、菜单栏图标
+├── assets/                # 分流数据（构建前下载）、DMG 卷图标源文件
 ├── screenshot/            # 界面截图（浅色 / 深色）
 ├── build.sh               # 编译脚本
 └── make-dmg.sh            # DMG 打包脚本
