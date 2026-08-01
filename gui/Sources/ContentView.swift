@@ -5,7 +5,7 @@ struct ContentView: View {
     @EnvironmentObject var app: AppState
     @State private var renaming = false
     @State private var renameText = ""
-    /// 命名/改名的错误提示（重名、空名）
+    /// 命名/改名的错误提示（重名、空名、超长）
     @State private var nameErrorText = ""
     @State private var showNameError = false
     /// 当前服务器还没保存过就想新建下一个
@@ -17,8 +17,17 @@ struct ContentView: View {
     @State private var showSaveResult = false
     @State private var saveResultOK = false
     @State private var saveResultText = ""
-    /// 发现新版本提示
-    @State private var showUpdateAlert = false
+    /// 分享服务器的多选弹窗
+    @State private var showShare = false
+    /// WebDAV 设置弹窗
+    @State private var showWebDAV = false
+    /// 本地还原前二次确认
+    @State private var confirmRestoreLocal = false
+    @State private var pendingRestoreURL: URL?
+    /// WebDAV 还原前二次确认
+    @State private var confirmWebDAVRestore = false
+    /// 分享/备份按钮弹出 NSMenu 的 action 目标
+    @State private var menuTarget = MenuActionTarget()
 
     private let labelWidth: CGFloat = 82
 
@@ -60,7 +69,7 @@ struct ContentView: View {
             // 日志区是弹性块，吃掉窗口比内容多的那点余量，永远贴底
             .frame(width: geo.size.width, height: geo.size.height, alignment: .top)
         }
-        .frame(minWidth: 723, minHeight: 620)
+        .frame(minWidth: 735, minHeight: 620)
         .onAppear {
             // 服务器列表为空（全新安装，或配置文件里没有服务器）：直接建一个
             // 待起名的服务器并弹命名框，不显示「还没有服务器」空态 ——
@@ -76,17 +85,15 @@ struct ContentView: View {
             if need {
                 app.needsNameInput = false
                 renameText = ""
+                nameErrorText = ""
                 renaming = true
             }
-        }
-        .onChange(of: app.updateInfo?.id) { id in
-            if id != nil { showUpdateAlert = true }
         }
         .alert(
             (app.selected?.name.isEmpty ?? true) ? "新建服务器名称" : "重命名服务器",
             isPresented: $renaming
         ) {
-            TextField("例如：xx服务器", text: $renameText)
+            TextField("例如：xx服务器", text: renameBinding)
             Button("取消", role: .cancel) {}
             Button("确定") {
                 if let err = app.rename(to: renameText) {
@@ -96,7 +103,7 @@ struct ContentView: View {
             }
         } message: {
             Text((app.selected?.name.isEmpty ?? true)
-                 ? "给新服务器起个名字，之后可在任何位置改。"
+                 ? "服务器名称最多支持8个汉字/16个字符"
                  : "输入新名字，回车确认。")
         }
         .alert("无法使用这个名字", isPresented: $showNameError) {
@@ -122,21 +129,6 @@ struct ContentView: View {
         } message: {
             Text(saveResultText)
         }
-        .alert("发现新版本 \(app.updateInfo?.tag ?? "")", isPresented: $showUpdateAlert) {
-            Button("以后再说", role: .cancel) { app.updateInfo = nil }
-            Button("下载并更新") { app.downloadUpdate() }
-        } message: {
-            Text("当前版本 \(Updater.localVersion)。\n新版将下载到「下载」文件夹并自动挂载，替换后重新打开即可。")
-        }
-        // 手动检查更新的结果（已是最新 / 检查失败）：用弹窗显示，不只在日志里
-        .alert("检查更新", isPresented: Binding(
-            get: { app.updateCheckMessage != nil },
-            set: { if !$0 { app.updateCheckMessage = nil } }
-        )) {
-            Button("好", role: .cancel) { app.updateCheckMessage = nil }
-        } message: {
-            Text(app.updateCheckMessage ?? "")
-        }
         // 启动失败等错误：窗口可能关着，必须弹窗
         .alert("出错", isPresented: Binding(
             get: { app.alertMessage != nil },
@@ -145,6 +137,26 @@ struct ContentView: View {
             Button("好", role: .cancel) { app.alertMessage = nil }
         } message: {
             Text(app.alertMessage ?? "")
+        }
+        .alert("从本地文件还原配置？", isPresented: $confirmRestoreLocal, presenting: pendingRestoreURL) { url in
+            Button("取消", role: .cancel) {}
+            Button("还原", role: .destructive) { app.restoreConfigLocal(from: url) }
+        } message: { _ in
+            Text("当前全部配置（服务器、分流规则、偏好）都会被这份备份覆盖。\n代理运行中会先停止。")
+        }
+        .alert("从 WebDAV 还原配置？", isPresented: $confirmWebDAVRestore) {
+            Button("取消", role: .cancel) {}
+            Button("还原", role: .destructive) { Task { await app.restoreFromWebDAV() } }
+        } message: {
+            Text("当前全部配置（服务器、分流规则、偏好）都会被 WebDAV 上的备份覆盖。\n代理运行中会先停止。")
+        }
+        .sheet(isPresented: $showShare) {
+            ShareSheet(show: $showShare)
+                .environmentObject(app)
+        }
+        .sheet(isPresented: $showWebDAV) {
+            WebDAVSettingsView(show: $showWebDAV)
+                .environmentObject(app)
         }
     }
 
@@ -166,8 +178,8 @@ struct ContentView: View {
         var h: CGFloat = 758          // 基准：规则收起时窗口 frame 高度（日志区约 5 行）
         if rulesExpanded {
             h += 46                   // 展开区：标题行间隔 + 底部状态行
-            h += min(CGFloat(ruleCount), 3) * 33   // 规则行，最多 3 行
-            if ruleCount > 3 { h += 16 }           // 超过 3 条才出现的搜索框
+            h += min(CGFloat(ruleCount), 3) * 36   // 规则行（30 高 + 6 间隔），最多 3 行
+            if ruleCount > 3 { h += 24 }           // 超过 3 条才出现的搜索框
         }
 
         DispatchQueue.main.async {
@@ -175,7 +187,7 @@ struct ContentView: View {
             // 最小高度跟内容走：手动把窗口拖矮到当前内容所需高度就停，
             // 操作行和日志永远不会被窗口底边盖住。
             AppDelegate.minContentHeight = h
-            win.minSize = NSSize(width: 723, height: h)
+            win.minSize = NSSize(width: 735, height: h)
             let current = win.frame.size.height
 
             // 用户手动拉高过窗口（比上次程序设定的还高），保持原样，
@@ -192,6 +204,39 @@ struct ContentView: View {
             win.setFrame(f, display: true, animate: false)
             lastSetHeight = h
         }
+    }
+
+    // MARK: - 分享 / 备份面板
+
+    private func importServersFromPanel() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.json]
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        app.importServers(from: url)
+    }
+
+    private func backupToLocalPanel() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.json]
+        panel.nameFieldStringValue = "EchOS-备份-\(Self.dateStamp()).json"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        app.backupConfigLocal(to: url)
+    }
+
+    private func restoreFromLocalPanel() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.json]
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        pendingRestoreURL = url
+        confirmRestoreLocal = true
+    }
+
+    private static func dateStamp() -> String {
+        let f = DateFormatter()
+        f.dateFormat = "yyyyMMdd-HHmmss"
+        return f.string(from: Date())
     }
 
     /// 「保存」按钮：有错不落盘，并弹窗说明原因；成功也弹窗确认。
@@ -215,12 +260,11 @@ struct ContentView: View {
     ) -> some View {
         Button(action: action) {
             label()
-                .font(.system(size: 13.5, weight: .semibold))
-                .tracking(0.8)
+                .font(.system(size: 13))
                 .foregroundStyle(.primary)
                 .padding(.horizontal, 14)
                 .padding(.vertical, 4)
-                .background(color, in: RoundedRectangle(cornerRadius: 5))
+                .background(color, in: RoundedRectangle(cornerRadius: 8))
                 .opacity(isActive ? 1 : 0.4)
         }
         .buttonStyle(.plain)
@@ -284,6 +328,7 @@ struct ContentView: View {
                 .help("还有服务器没保存时不能新增下一个，先保存或删除")
                 Button("重命名") {
                     renameText = app.selected?.name ?? ""
+                    nameErrorText = ""
                     renaming = true
                 }
                 .disabled(app.isRunning)
@@ -300,12 +345,74 @@ struct ContentView: View {
 
                 Spacer()
 
+                // 分享：导出选中的服务器 / 从分享文件导入。
+                // 用普通 Button + NSMenu，而不是 SwiftUI Menu —— 后者标签渲染会缩放图标、
+                // 改间距，和「自检」对不齐。
+                Button {
+                    menuTarget.onShareExport = { showShare = true }
+                    menuTarget.onShareImport = { importServersFromPanel() }
+                    let menu = NSMenu()
+                    let export = NSMenuItem(title: "选择并导出服务器…", action: #selector(MenuActionTarget.shareExport), keyEquivalent: "")
+                    export.target = menuTarget
+                    let imp = NSMenuItem(title: "导入服务器…", action: #selector(MenuActionTarget.shareImport), keyEquivalent: "")
+                    imp.target = menuTarget
+                    menu.addItem(export)
+                    menu.addItem(imp)
+                    menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+                } label: {
+                    Label("分享", systemImage: "square.and.arrow.up")
+                        .labelStyle(TintedIconLabelStyle(color: .blue))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(app.isRunning || app.isStarting)
+                .help("导出选中的服务器给其他设备，或导入别人分享的服务器")
+
+                // 备份：整份配置本地 / WebDAV
+                Button {
+                    menuTarget.onBackupLocal = { backupToLocalPanel() }
+                    menuTarget.onRestoreLocal = { restoreFromLocalPanel() }
+                    menuTarget.onWebDAVSettings = { showWebDAV = true }
+                    menuTarget.onBackupWebDAV = { Task { await app.backupToWebDAV() } }
+                    menuTarget.onRestoreWebDAV = { confirmWebDAVRestore = true }
+                    let menu = NSMenu()
+                    let bl = NSMenuItem(title: "备份到本地文件…", action: #selector(MenuActionTarget.backupLocal), keyEquivalent: "")
+                    bl.target = menuTarget
+                    let rl = NSMenuItem(title: "从本地文件还原…", action: #selector(MenuActionTarget.restoreLocal), keyEquivalent: "")
+                    rl.target = menuTarget
+                    let ws = NSMenuItem(title: "WebDAV 设置…", action: #selector(MenuActionTarget.webdavSettings), keyEquivalent: "")
+                    ws.target = menuTarget
+                    let bw = NSMenuItem(title: "备份到 WebDAV", action: #selector(MenuActionTarget.backupWebDAV), keyEquivalent: "")
+                    bw.target = menuTarget
+                    let rw = NSMenuItem(title: "从 WebDAV 还原…", action: #selector(MenuActionTarget.restoreWebDAV), keyEquivalent: "")
+                    rw.target = menuTarget
+                    menu.addItem(bl)
+                    menu.addItem(rl)
+                    menu.addItem(.separator())
+                    menu.addItem(ws)
+                    menu.addItem(bw)
+                    menu.addItem(rw)
+                    menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+                } label: {
+                    Label(app.webdavBusy ? "备份中…" : "备份", systemImage: "externaldrive")
+                        .labelStyle(TintedIconLabelStyle(color: .yellow))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(app.isRunning || app.isStarting || app.webdavBusy)
+                .help("把整份配置（服务器 + 分流规则 + 偏好）备份到本地或 WebDAV")
+
                 Button {
                     app.runSelfCheck()
                 } label: {
                     Label(app.checking ? "检测中" : "自检", systemImage: "checkmark.seal.fill")
-                        .foregroundStyle(app.isRunning && !app.checking ? Color.green : Color.secondary)
+                        .labelStyle(TintedIconLabelStyle(color: app.isRunning && !app.checking ? .green : .secondary))
                 }
+                .buttonStyle(.plain)
                 .disabled(!app.isRunning || app.checking)
                 .help("手动跑一次并把明细写进日志。\n启动代理后会自动静默自检一次，结果看状态灯。")
             }
@@ -411,9 +518,9 @@ struct ContentView: View {
                         .padding(.vertical, 2)
                     }
                     // 高度跟着条数走，最多 3 行；再多就在列表内部滚动，
-                    // 不去牵动整页布局。clipped 保证第 4 条完全不可见，
-                    // 不会露出半截在那。
-                    .frame(height: min(CGFloat(filtered.count), 3) * 33 + 4)
+                    // 不去牵动整页布局。行高固定 30，正好装下 3 行（90+12 间隔+4 内边距），
+                    // 第 4 条起点在 110 超过 106，被彻底裁掉，不会露出半截。
+                    .frame(height: CGFloat(min(filtered.count, 3)) * 36 - 2)
                     .clipped()
                 }
 
@@ -517,6 +624,8 @@ struct ContentView: View {
             }
             .help("删除这条规则")
         }
+        // 固定行高：规则列表的容器高度按它精确计算，第 4 条完全藏在滚动区里
+        .frame(height: 30)
         .opacity(isShadowed ? 0.55 : 1)
     }
 
@@ -568,7 +677,7 @@ struct ContentView: View {
                     app.start()
                 } label: {
                     Label("启动代理", systemImage: "play.fill")
-                        .frame(width: 84)
+                        .frame(width: 84, height: 30)
                 }
                 .keyboardShortcut(.return, modifiers: .command)
 
@@ -576,7 +685,7 @@ struct ContentView: View {
                     app.stop()
                 } label: {
                     Label("停止代理", systemImage: "stop.fill")
-                        .frame(width: 84)
+                        .frame(width: 84, height: 30)
                 }
             }
             .toggleStyle(.checkbox)
@@ -841,10 +950,56 @@ struct ContentView: View {
         )
     }
 
+    /// 命名输入框的绑定：实时截断到显示宽度上限（8 汉字 / 16 英文），
+    /// 输入框里就超不过，也就不会产生"名字太长"的报错。
+    private var renameBinding: Binding<String> {
+        Binding(
+            get: { renameText },
+            set: { renameText = $0.truncated(toWidth: 16) }
+        )
+    }
+
     private func color(for line: String) -> Color {
         if line.contains("失败") || line.contains("错误") || line.contains("error") { return .red }
         if line.contains("[系统代理]") { return .orange }
         if line.contains("[系统]") { return .accentColor }
         return .primary
     }
+}
+
+/// 菜单/按钮标签：图标染指定色、文字用默认色，图标与文字间距统一。
+/// 「分享」「备份」「自检」三个都套这个。
+/// 图标固定宽度，把不同 SF Symbol 字形（盾牌/硬盘/方框箭头）的固有留白差异抹平，
+/// 保证图标右边缘到文字的距离三个按钮严格一致。
+private struct TintedIconLabelStyle: LabelStyle {
+    let color: Color
+    func makeBody(configuration: Configuration) -> some View {
+        HStack(spacing: 8) {
+            configuration.icon
+                .foregroundStyle(color)
+                .frame(width: 16)
+            configuration.title
+        }
+    }
+}
+
+/// NSMenu 的 action 目标。分享/备份用普通 Button 弹 NSMenu（不用 SwiftUI Menu），
+/// 这样按钮标签渲染和「自检」完全一致，图标文字间距才能统一。
+@MainActor
+final class MenuActionTarget: NSObject {
+    var onShareExport: (() -> Void)?
+    var onShareImport: (() -> Void)?
+    var onBackupLocal: (() -> Void)?
+    var onRestoreLocal: (() -> Void)?
+    var onWebDAVSettings: (() -> Void)?
+    var onBackupWebDAV: (() -> Void)?
+    var onRestoreWebDAV: (() -> Void)?
+
+    @objc func shareExport() { onShareExport?() }
+    @objc func shareImport() { onShareImport?() }
+    @objc func backupLocal() { onBackupLocal?() }
+    @objc func restoreLocal() { onRestoreLocal?() }
+    @objc func webdavSettings() { onWebDAVSettings?() }
+    @objc func backupWebDAV() { onBackupWebDAV?() }
+    @objc func restoreWebDAV() { onRestoreWebDAV?() }
 }

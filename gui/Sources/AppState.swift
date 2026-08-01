@@ -21,15 +21,14 @@ final class AppState: ObservableObject {
     /// 未提交的服务器只在内存里存活（可编辑、可切换），退出重开后消失。
     private var committedIDs: Set<UUID> = []
     @Published var proxyTakenOver = SystemProxy.isActive
+    /// WebDAV 上传/下载进行中（用来置灰按钮、防连点）
+    @Published var webdavBusy = false
 
     // MARK: - 更新相关状态
     /// 发现了比本地更新的版本（有值即弹更新提示）
     @Published var updateInfo: Updater.ReleaseInfo?
     /// 检查/下载更新的进度文案（"正在检查…""正在下载 45%…""已是最新"）
     @Published var updateStatus: String = ""
-    /// 手动检查更新的结果弹窗文案（nil = 不弹）。
-    /// 发现新版本走 updateInfo 弹窗，这里只放「已是最新 / 检查失败」这类结果
-    @Published var updateCheckMessage: String?
     /// 需要弹窗提示的错误（nil = 不弹）。
     /// 菜单栏触发启动失败时窗口可能关着，日志看不到，必须弹窗
     @Published var alertMessage: String?
@@ -111,6 +110,12 @@ final class AppState: ObservableObject {
         config.servers.contains { !committedIDs.contains($0.id) }
     }
 
+    /// 该服务器是否已点过「保存」（通过校验、允许写盘）。
+    /// 分享导出只导出这种"真实"的服务器，没保存的空壳不往外发。
+    func isServerSaved(_ id: UUID) -> Bool {
+        committedIDs.contains(id)
+    }
+
     func update(_ mutate: (inout ServerConfig) -> Void) {
         guard let idx = selectedIndex else { return }
         mutate(&config.servers[idx])
@@ -125,15 +130,18 @@ final class AppState: ObservableObject {
         out.save()
     }
 
+    private static let nameTooLongMessage = "名字太长：最多 8 个汉字或 16 个英文/数字/符号"
+
     /// 保存当前服务器配置到文件。不完整时返回错误原因并拒绝保存，成功返回 nil。
     @discardableResult
     func saveCurrentServer() -> String? {
         guard let idx = selectedIndex else { return "没有选中的服务器" }
         let n = config.servers[idx].name.trimmingCharacters(in: .whitespaces)
         if n.isEmpty { return "请先给服务器起个名字" }
+        if n.displayWidth > 16 { return Self.nameTooLongMessage }
         if config.servers.contains(where: { $0.id != config.servers[idx].id
             && $0.name.trimmingCharacters(in: .whitespaces) == n }) {
-            return "已有同名服务器「\(n)」，请换个名字"
+            return "已存在该名称服务器，请重试。"
         }
         if let err = config.servers[idx].validate() {
             log("[系统] 保存失败：\(err)")
@@ -181,10 +189,11 @@ final class AppState: ObservableObject {
     func rename(to newName: String) -> String? {
         let n = newName.trimmingCharacters(in: .whitespaces)
         guard !n.isEmpty else { return "服务器名称不能为空" }
+        if n.displayWidth > 16 { return Self.nameTooLongMessage }
         guard let idx = selectedIndex else { return "没有选中的服务器" }
         let id = config.servers[idx].id
         if config.servers.contains(where: { $0.id != id && $0.name.trimmingCharacters(in: .whitespaces) == n }) {
-            return "已有同名服务器「\(n)」，请换个名字"
+            return "已存在该名称服务器，请重试。"
         }
         config.servers[idx].name = n
         return nil
@@ -446,6 +455,22 @@ final class AppState: ObservableObject {
                 self.log("[系统] 内核已退出（状态码 \(proc.terminationStatus)）")
                 if self.proxyTakenOver { self.disableSystemProxy() }
                 self.refreshStatusText()
+
+                // 非零退出码 = 启动失败或运行中崩溃。stop() 会先把 terminationHandler
+                // 置 nil，所以走到这里一定是异常退出。绝大多数是端口被占用，
+                // 从内核日志里找"address already in use / bind"这类关键字，
+                // 给出明确的修复提示，而不是只显示一个生硬的"状态码"。
+                if proc.terminationStatus != 0 {
+                    let hints = Array(self.logLines.suffix(20)).joined(separator: "\n")
+                    let lower = hints.lowercased()
+                    if lower.contains("address already in use")
+                        || lower.contains("cannot bind")
+                        || lower.contains("bind:") {
+                        self.notify("启动失败，端口已被其他程序占用。\n请关掉占用端口的程序，或换个监听端口后重试。")
+                    } else {
+                        self.notify("启动失败，请查看下方运行日志中的错误信息后重试。")
+                    }
+                }
             }
         }
 
@@ -705,6 +730,243 @@ final class AppState: ObservableObject {
         statusText = t
     }
 
+    // MARK: - 服务器分享
+
+    /// 把选中的服务器导出成分享文件。只导出点过「保存」的服务器，
+    /// 没保存的空壳服务器（参数不全）不往外发。
+    func exportSelectedServers(_ ids: Set<UUID>, to url: URL) {
+        let servers = config.servers.filter { ids.contains($0.id) && committedIDs.contains($0.id) }
+        let enc = JSONEncoder()
+        enc.outputFormatting = [.prettyPrinted, .sortedKeys]
+        do {
+            let data = try enc.encode(ServerShareFile(servers: servers))
+            try data.write(to: url, options: .atomic)
+            log("[系统] 已导出 \(servers.count) 个服务器到 \(url.lastPathComponent)")
+        } catch {
+            log("[系统] 导出失败：\(error.localizedDescription)")
+        }
+    }
+
+    /// 从分享文件导入服务器，追加到现有列表。
+    /// 重新生成 id，避免和已有服务器撞车。
+    /// 规则：
+    ///  1) 地址/端口等参数不完整（token 可选）的视为无效服务器，直接过滤；
+    ///  2) 名称不能重复：名称撞车时看服务地址+端口 —— 完全相同是真重复，跳过；
+    ///     参数不同则自动改名「名称-01」再导入（不同目标但同名，不该被当成同一台）；
+    ///  3) 导入成功后，当前所有未保存的"空服务器/草稿"一律删除 ——
+    ///     它们不算真实数据，留着只会产生垃圾配置。
+    func importServers(from url: URL) {
+        do {
+            let data = try Data(contentsOf: url)
+            let file = try JSONDecoder().decode(ServerShareFile.self, from: data)
+            guard file.format == "echos-servers" else { throw ShareError.notShareFile }
+            var added = 0
+            var skipped = 0
+            var renamed = 0
+            // 已保存服务器的名称集合，名称不允许重复
+            var names = Set(config.servers.filter { committedIDs.contains($0.id) }
+                .map { $0.name.trimmingCharacters(in: .whitespaces) })
+            for var s in file.servers {
+                // 1) 参数不完整（不含 token，token 可选）→ 无效，过滤
+                if let err = s.validate() {
+                    skipped += 1
+                    log("[系统] 跳过无效服务器：\(err)")
+                    continue
+                }
+                let baseName = s.name.trimmingCharacters(in: .whitespaces)
+                if names.contains(baseName) {
+                    // 2) 名称撞车：看服务地址+端口是不是完全一样
+                    let sameTarget = config.servers.contains { existing in
+                        committedIDs.contains(existing.id)
+                            && existing.name.trimmingCharacters(in: .whitespaces) == baseName
+                            && existing.server.trimmingCharacters(in: .whitespaces) == s.server.trimmingCharacters(in: .whitespaces)
+                            && existing.serverPort == s.serverPort
+                    }
+                    if sameTarget {
+                        skipped += 1
+                        log("[系统] 跳过重复服务器：\(baseName)（同一服务地址和端口）")
+                        continue
+                    }
+                    // 参数不同：自动改名「-01」「-02」…，保证名称唯一
+                    s.name = availableName(baseName, in: names)
+                    renamed += 1
+                    log("[系统] 「\(baseName)」已存在且参数不同，自动改名为「\(s.name)」")
+                }
+                s.id = UUID()
+                config.servers.append(s)
+                committedIDs.insert(s.id)   // 导入即视为已保存，可立即使用
+                names.insert(s.name.trimmingCharacters(in: .whitespaces))
+                added += 1
+            }
+            // 3) 删除所有未保存的服务器（空壳/未完成草稿）
+            let before = config.servers.count
+            config.servers.removeAll { !committedIDs.contains($0.id) }
+            let removedDrafts = before - config.servers.count
+            if removedDrafts > 0 {
+                log("[系统] 已删除 \(removedDrafts) 台未保存的空服务器")
+            }
+            // 选中项可能指向被删的草稿，修回第一个有效服务器
+            if config.selectedID == nil || !config.servers.contains(where: { $0.id == config.selectedID }) {
+                config.selectedID = config.servers.first?.id
+            }
+            // 用 persist() 而不是 save()：只落盘已保存的服务器，
+            // 否则内存里那个还没点「保存」的草稿会被一并写进文件，
+            // 重启后变成"已保存"的无效服务器（被"卡 bug 保存"）。
+            persist()
+            var tail = ""
+            if renamed > 0 { tail += "，改名 \(renamed) 台" }
+            if skipped > 0 { tail += "，跳过 \(skipped) 台无效/重复" }
+            log("[系统] 已导入 \(added) 个服务器\(tail)")
+        } catch {
+            log("[系统] 导入失败：请选择服务器分享文件（.json）")
+        }
+    }
+
+    /// 给撞名的服务器找一个不冲突的名字：名称-01、-02…，并控制总长度不超上限。
+    private func availableName(_ base: String, in names: Set<String>) -> String {
+        let trimmed = base.trimmingCharacters(in: .whitespaces)
+        for i in 1...99 {
+            let suffix = String(format: "-%02d", i)
+            let candidate = trimmed.truncated(toWidth: 16 - suffix.displayWidth) + suffix
+            if !names.contains(candidate) { return candidate }
+        }
+        return trimmed.truncated(toWidth: 16)
+    }
+
+    // MARK: - 整配置备份 / 还原
+
+    /// 备份前的"干净配置"：只留点过「保存」的服务器，未保存的草稿不进备份，
+    /// 免得还原到别的机器上混进一堆空壳。
+    private var cleanConfig: AppConfig {
+        var out = config
+        out.servers = config.servers.filter { committedIDs.contains($0.id) }
+        return out
+    }
+
+    func backupConfigLocal(to url: URL) {
+        let out = cleanConfig
+        let enc = JSONEncoder()
+        enc.outputFormatting = [.prettyPrinted, .sortedKeys]
+        do {
+            let data = try enc.encode(out)
+            try data.write(to: url, options: .atomic)
+            log("[系统] 配置已备份到 \(url.lastPathComponent)（\(out.servers.count) 个服务器）")
+        } catch {
+            log("[系统] 备份失败：\(error.localizedDescription)")
+        }
+    }
+
+    func restoreConfigLocal(from url: URL) {
+        do {
+            let data = try Data(contentsOf: url)
+            let cfg = try JSONDecoder().decode(AppConfig.self, from: data)
+            applyRestored(cfg)
+        } catch {
+            log("[系统] 还原失败：文件不是有效的配置备份")
+        }
+    }
+
+    /// 把一份配置应用到当前 App。还原期间先停代理，避免配置和连接对不上。
+    /// 还原前逐台校验，参数不完整的服务器直接跳过，不让坏数据污染整体。
+    private func applyRestored(_ cfg: AppConfig) {
+        if isRunning || isStarting {
+            log("[系统] 还原配置，先停止代理…")
+            stop()
+        }
+        var c = cfg
+        var dropped = 0
+        c.servers = c.servers.filter { s in
+            if s.validate() == nil { return true }
+            dropped += 1
+            return false
+        }
+        if dropped > 0 { log("[系统] 还原时跳过 \(dropped) 台参数不完整的服务器") }
+        if c.servers.isEmpty {
+            var first = ServerConfig()
+            first.name = "服务器 1"
+            c.servers = [first]
+        }
+        if c.selectedID == nil || !c.servers.contains(where: { $0.id == c.selectedID }) {
+            c.selectedID = c.servers.first?.id
+        }
+        config = c
+        committedIDs = Set(c.servers.map(\.id))   // 还原的服务器一律视为已保存
+        persist()
+        rulesDirty = false
+        applyDockIconPolicy()
+        refreshProxySummary()
+        log("[系统] 配置已还原（\(c.servers.count) 个服务器）")
+    }
+
+    // MARK: - WebDAV
+
+    /// 当前 WebDAV 账号在钥匙串里的密码
+    var webdavPassword: String? {
+        guard let u = config.webdav?.username, !u.isEmpty else { return nil }
+        return KeychainStore.read(account: u)
+    }
+
+    func saveWebDAV(url: String, username: String, password: String, directory: String) {
+        let cleanURL = url.trimmingCharacters(in: .whitespaces)
+        let user = username.trimmingCharacters(in: .whitespaces)
+        config.webdav = WebDAVConfig(url: cleanURL, username: user, directory: directory.trimmingCharacters(in: .whitespaces))
+        persist()   // 只落盘已保存服务器，别把未保存草稿一起写进去
+        if !user.isEmpty && !password.isEmpty {
+            KeychainStore.save(account: user, password: password)
+        }
+        log("[系统] WebDAV 设置已保存")
+    }
+
+    func backupToWebDAV() async {
+        guard let w = config.webdav, !w.url.isEmpty else {
+            log("[系统] 请先在「WebDAV 设置」里填好地址")
+            return
+        }
+        guard let url = WebDAVClient.endpoint(w.url, directory: w.directory) else {
+            log("[系统] WebDAV 地址无效")
+            return
+        }
+        guard let password = webdavPassword else {
+            log("[系统] 请先设置 WebDAV 密码")
+            return
+        }
+        webdavBusy = true
+        defer { webdavBusy = false }
+        do {
+            let enc = JSONEncoder()
+            enc.outputFormatting = [.prettyPrinted, .sortedKeys]
+            let data = try enc.encode(cleanConfig)
+            try await WebDAVClient.upload(data, to: url, username: w.username, password: password)
+            log("[系统] 已备份到 WebDAV")
+        } catch {
+            log("[系统] WebDAV 备份失败：\(error.localizedDescription)")
+        }
+    }
+
+    func restoreFromWebDAV() async {
+        guard let w = config.webdav, !w.url.isEmpty else {
+            log("[系统] 请先在「WebDAV 设置」里填好地址")
+            return
+        }
+        guard let url = WebDAVClient.endpoint(w.url, directory: w.directory) else {
+            log("[系统] WebDAV 地址无效")
+            return
+        }
+        guard let password = webdavPassword else {
+            log("[系统] 请先设置 WebDAV 密码")
+            return
+        }
+        webdavBusy = true
+        defer { webdavBusy = false }
+        do {
+            let data = try await WebDAVClient.download(from: url, username: w.username, password: password)
+            let cfg = try JSONDecoder().decode(AppConfig.self, from: data)
+            applyRestored(cfg)
+        } catch {
+            log("[系统] WebDAV 还原失败：\(error.localizedDescription)")
+        }
+    }
+
     /// App 退出前的收尾：停内核 + 还原系统代理，避免把用户网络留在坏状态。
     func shutdown() {
         if proxyTakenOver { SystemProxy.restore() }
@@ -740,11 +1002,11 @@ final class AppState: ObservableObject {
     }
 
     /// 检查 App 是否有新版本（手动/启动共用）。completion 在结果确定后主线程回调。
-    /// 手动检查（silent = false）结果用弹窗显示，不只在日志里憋着。
+    /// 手动检查（silent = false）结果用独立 NSAlert 显示，不打开主窗口。
     func checkAppUpdate(silent: Bool, completion: (() -> Void)? = nil) {
         guard !Updater.repo.isEmpty else {
             updateStatus = "未配置更新源，无法检查更新"
-            if !silent { updateCheckMessage = "未配置更新源，无法检查更新" }
+            if !silent { showSimpleDialog("未配置更新源，无法检查更新") }
             completion?()
             return
         }
@@ -754,7 +1016,7 @@ final class AppState: ObservableObject {
             guard let info else {
                 self.updateStatus = "检查失败（网络或 GitHub 不可达）"
                 self.log("[更新] 检查失败：网络或 GitHub 不可达")
-                if !silent { self.updateCheckMessage = "检查更新失败（网络或 GitHub 不可达）" }
+                if !silent { self.showSimpleDialog("检查更新失败（网络或 GitHub 不可达）") }
                 completion?()
                 return
             }
@@ -764,17 +1026,40 @@ final class AppState: ObservableObject {
                 self.updateInfo = info
                 self.updateStatus = "发现新版本 \(info.tag)"
                 self.log("[更新] 发现新版本 \(info.tag)（当前 \(Updater.localVersion)）")
-                self.presentMainWindow()   // 窗口可能关着（菜单栏触发的），调出来才能弹更新提示
+                self.promptUpdateDialog(info)   // 独立弹窗，不打开主窗口
             } else {
                 self.updateStatus = "已是最新版本"
                 self.log("[更新] 已是最新版本（\(Updater.localVersion)）")
-                if !silent { self.updateCheckMessage = "已是最新版本（v\(Updater.localVersion)）" }
+                if !silent { self.showSimpleDialog("已是最新版本（v\(Updater.localVersion)）") }
             }
             completion?()
         }
     }
 
-    /// 下载新版 DMG 到 ~/Downloads，完成后自动挂载并打开。
+    /// 单一按钮的信息弹窗（检查更新的"已是最新/失败/未配置"结果）。
+    private func showSimpleDialog(_ text: String) {
+        let alert = NSAlert()
+        alert.messageText = "检查更新"
+        alert.informativeText = text
+        alert.addButton(withTitle: "好")
+        alert.runModal()
+    }
+
+    /// 发现新版本时的独立弹窗（NSAlert）。不打开主窗口 ——
+    /// 菜单栏触发检查时窗口是隐藏的（关闭按钮只隐藏不销毁），
+    /// 这里不用 NSApp.activate，弹窗照常显示。
+    private func promptUpdateDialog(_ info: Updater.ReleaseInfo) {
+        let alert = NSAlert()
+        alert.messageText = "发现新版本 \(info.tag)"
+        alert.informativeText = "当前版本 \(Updater.localVersion)。\n新版将自动下载并替换 /Applications 里的 EchOS.app，替换后自动重启。"
+        alert.addButton(withTitle: "下载并更新")
+        alert.addButton(withTitle: "以后再说")
+        if alert.runModal() == .alertFirstButtonReturn {
+            downloadUpdate()
+        }
+    }
+
+    /// 下载新版 DMG 到 ~/Downloads，完成后自动替换 /Applications 里的旧版并重启。
     func downloadUpdate() {
         guard let info = updateInfo else { return }
         downloadProgress = 0
@@ -787,16 +1072,92 @@ final class AppState: ObservableObject {
             guard let self else { return }
             self.downloadProgress = nil
             if let url {
-                self.updateStatus = "下载完成，已挂载 DMG"
+                self.updateStatus = "下载完成，正在替换…"
                 self.log("[更新] 下载完成：\(url.path)")
-                self.updateInfo = nil
-                NSWorkspace.shared.open(url)   // 挂载并打开，用户拖入 Applications 替换
-                self.log("[更新] 请把新版本 EchOS.app 拖入 Applications 替换旧版，再重新打开")
+                self.performAutoUpdate(dmgURL: url)
             } else {
                 self.updateStatus = "下载失败"
                 self.log("[更新] 下载失败，请稍后重试")
             }
         }
+    }
+
+    /// 自动更新：挂载 DMG → 写更新脚本 → 退出主进程 → 脚本替换 /Applications 后重启。
+    /// 任一步失败都退回"打开 DMG 手动拖入"。
+    private func performAutoUpdate(dmgURL: URL) {
+        guard let mountPoint = Updater.mountDMG(dmgURL) else {
+            updateStatus = "自动更新失败，已退回手动方式"
+            log("[更新] DMG 挂载失败，请手动打开并拖入 Applications")
+            NSWorkspace.shared.open(dmgURL)
+            return
+        }
+        let newApp = URL(fileURLWithPath: mountPoint).appendingPathComponent("EchOS.app")
+        guard FileManager.default.fileExists(atPath: newApp.path) else {
+            updateStatus = "自动更新失败，已退回手动方式"
+            log("[更新] DMG 里没找到 EchOS.app，请手动拖入")
+            hdiutilDetach(mountPoint)
+            NSWorkspace.shared.open(dmgURL)
+            return
+        }
+        guard let scriptURL = writeUpdateScript(newAppPath: newApp.path, mountPoint: mountPoint) else {
+            updateStatus = "自动更新失败，已退回手动方式"
+            log("[更新] 更新脚本创建失败，请手动拖入")
+            hdiutilDetach(mountPoint)
+            NSWorkspace.shared.open(dmgURL)
+            return
+        }
+        updateStatus = "正在重启 App 完成更新…"
+        log("[更新] 正在替换 /Applications/EchOS.app 并重启…")
+        // 脚本先在后台跑起来；它等主进程退出后再替换，所以这里退出主进程
+        launchDetached(scriptURL, newAppPath: newApp.path, mountPoint: mountPoint)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            self.shutdown()
+            NSApp.terminate(nil)
+        }
+    }
+
+    /// 把更新脚本写到 /tmp，返回路径。脚本：等 EchOS 退出 → 替换 → 重启。
+    private func writeUpdateScript(newAppPath: String, mountPoint: String) -> URL? {
+        let script = """
+        #!/bin/bash
+        APP="/Applications/EchOS.app"
+        NEW="$1"
+        MP="$2"
+        for i in $(seq 1 150); do
+          if ! pgrep -x "EchOS" > /dev/null 2>&1; then break; fi
+          sleep 0.1
+        done
+        rm -rf "$APP"
+        cp -R "$NEW" "$APP" 2>/dev/null
+        chmod +x "$APP/Contents/MacOS/EchOS" 2>/dev/null
+        xattr -dr com.apple.quarantine "$APP" 2>/dev/null
+        if [ -n "$MP" ]; then hdiutil detach "$MP" > /dev/null 2>&1; fi
+        open "$APP"
+        """
+        let url = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("echos-update-\(Int(Date().timeIntervalSince1970)).sh")
+        do {
+            try script.write(to: url, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+            return url
+        } catch {
+            return nil
+        }
+    }
+
+    /// 后台启动脚本（不等待）。父进程退出后脚本继续执行。
+    private func launchDetached(_ script: URL, newAppPath: String, mountPoint: String) {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/bash")
+        p.arguments = [script.path, newAppPath, mountPoint]
+        try? p.run()
+    }
+
+    private func hdiutilDetach(_ mountPoint: String) {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil")
+        p.arguments = ["detach", mountPoint]
+        try? p.run()
+        p.waitUntilExit()
     }
 
     /// 更新分流数据。silent = 启动时的静默检查（不打断用户，只写日志）。
@@ -820,19 +1181,6 @@ final class AppState: ObservableObject {
             geoStatus = "未更新（使用 App 内置数据）"
         } else {
             geoStatus = "数据版本 \(v)（\(Updater.hasLocalGeoData() ? "已下载到本地" : "使用内置数据")）"
-        }
-    }
-
-    /// 把主窗口调出来（菜单栏触发更新检查时窗口可能是关着的）。
-    /// 只在前台模式才切 .regular；后台模式保持 .accessory，否则程序坞图标会
-    /// 被强拉出来（和"在程序坞显示图标"开关对不上）。
-    func presentMainWindow() {
-        if config.showDockIcon {
-            NSApp.setActivationPolicy(.regular)
-        }
-        NSApp.activate(ignoringOtherApps: true)
-        for w in NSApp.windows where w.contentView != nil {
-            w.makeKeyAndOrderFront(nil)
         }
     }
 }

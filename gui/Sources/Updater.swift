@@ -123,6 +123,26 @@ enum Updater {
         downloader.start(from: dmgURL, to: dest, progress: progress, finish: finish)
     }
 
+    /// 挂载 DMG（nobrowse，不弹出 Finder 窗口），返回挂载点；失败返回 nil。
+    static func mountDMG(_ url: URL) -> String? {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil")
+        p.arguments = ["attach", url.path, "-nobrowse", "-plist"]
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = Pipe()
+        do { try p.run() } catch { return nil }
+        p.waitUntilExit()
+        guard p.terminationStatus == 0 else { return nil }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        guard let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any],
+              let entities = plist["system-entities"] as? [[String: Any]] else { return nil }
+        for e in entities {
+            if let mp = e["mount-point"] as? String, !mp.isEmpty { return mp }
+        }
+        return nil
+    }
+
     // MARK: - 分流数据更新
 
     struct GeoMeta: Codable {

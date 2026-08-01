@@ -17,7 +17,7 @@ struct ECHApp: App {
                     app.checkForUpdatesAtStartup()
                 }
         }
-        .defaultSize(width: 723, height: 758)
+        .defaultSize(width: 735, height: 758)
         .commands {
             CommandGroup(replacing: .newItem) {}
         }
@@ -50,10 +50,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             guard let win = NSApp.windows.first(where: { $0.contentView != nil }) else { return }
             // 只定宽度和最小尺寸；高度交给 ContentView 的 syncWindowHeight
             // 按当前内容算，免得两处各设一套值互相覆盖
-            win.setContentSize(NSSize(width: 723, height: 774))
+            win.setContentSize(NSSize(width: 735, height: 774))
             // minSize 只挡"窗口被拖得太小"：拉到 758（规则收起时内容所需高度）
             // 就停，底部操作行和日志不会被窗口底边盖住
-            win.minSize = NSSize(width: 723, height: 758)
+            win.minSize = NSSize(width: 735, height: 758)
             win.delegate = self
             win.center()
             win.makeKeyAndOrderFront(nil)
@@ -91,6 +91,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     // 关窗口不退出：代理继续在后台跑，靠菜单栏图标控制
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+
+    // 点红色关闭按钮：只隐藏窗口，不销毁。
+    // 若真的 close，SwiftUI 的 WindowGroup 会在 App 被激活时（比如点菜单栏
+    // 「检查更新」）自动把主窗口恢复出来，弹独立更新对话框时就会多带出主页面。
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        sender.orderOut(nil)
+        return false
+    }
 
     // 退出前一定要把系统代理还原回去，否则用户会"断网"
     func applicationWillTerminate(_ notification: Notification) {

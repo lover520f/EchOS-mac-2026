@@ -539,6 +539,31 @@ struct ServerConfig: Codable, Identifiable, Equatable {
     }
 }
 
+/// WebDAV 备份目标。密码不落盘，存系统钥匙串。
+struct WebDAVConfig: Codable, Equatable {
+    var url: String = ""
+    var username: String = ""
+    /// 远端备份目录。留空时按默认目录（EchOS_Backup）处理。
+    var directory: String = ""
+
+    /// 老配置里没有 directory 字段，缺键时用默认值，别把整个 WebDAV 设置作废。
+    init() {}
+    init(url: String, username: String, directory: String) {
+        self.url = url
+        self.username = username
+        self.directory = directory
+    }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        func s(_ k: CodingKeys, _ d: String) -> String {
+            ((try? c.decodeIfPresent(String.self, forKey: k)) ?? nil) ?? d
+        }
+        url = s(.url, "")
+        username = s(.username, "")
+        directory = s(.directory, "")
+    }
+}
+
 /// 整个 App 的持久化配置
 struct AppConfig: Codable {
     var servers: [ServerConfig] = []
@@ -554,6 +579,8 @@ struct AppConfig: Codable {
     var showDockIcon: Bool = false
     /// 底部日志面板是否展开
     var logVisible: Bool = true
+    /// WebDAV 备份目标（密码在钥匙串里）
+    var webdav: WebDAVConfig?
 
     init() {}
 
@@ -568,6 +595,7 @@ struct AppConfig: Codable {
         logLevel = ((try? c.decodeIfPresent(LogLevel.self, forKey: .logLevel)) ?? nil) ?? .info
         showDockIcon = b(.showDockIcon, false)
         logVisible = b(.logVisible, true)
+        webdav = (try? c.decodeIfPresent(WebDAVConfig.self, forKey: .webdav)) ?? nil
     }
 
     static let fileURL: URL = {
@@ -597,5 +625,28 @@ struct AppConfig: Codable {
         if let data = try? enc.encode(self) {
             try? data.write(to: Self.fileURL, options: .atomic)
         }
+    }
+}
+
+// MARK: - 名字显示宽度
+
+extension String {
+    /// 显示宽度：汉字/全角算 2，英文数字符号算 1。
+    /// 服务器名上限 16 宽度 = 8 个汉字 或 16 个英文/符号，混搭按宽度累计。
+    var displayWidth: Int {
+        unicodeScalars.reduce(0) { w, u in u.value >= 0x1100 ? w + 2 : w + 1 }
+    }
+
+    /// 从尾部截断，使显示宽度不超过 max。用于输入框实时限长。
+    func truncated(toWidth max: Int) -> String {
+        var out = ""
+        var w = 0
+        for ch in self {
+            let cw = ch.unicodeScalars.first.map { $0.value >= 0x1100 ? 2 : 1 } ?? 1
+            if w + cw > max { break }
+            out.append(ch)
+            w += cw
+        }
+        return out
     }
 }
