@@ -1018,7 +1018,7 @@ final class AppState: NSObject, ObservableObject {
             guard let info else {
                 self.updateStatus = "检查失败（网络或 GitHub 不可达）"
                 self.log("[更新] 检查失败：网络或 GitHub 不可达")
-                if !silent { self.showSimpleDialog("检查更新失败（网络或 GitHub 不可达）") }
+                if !silent { self.showSimpleDialog("检查更新失败，请检查网络") }
                 completion?()
                 return
             }
@@ -1038,9 +1038,12 @@ final class AppState: NSObject, ObservableObject {
         }
     }
 
-    /// 让 NSAlert 弹窗窗口尽量居中。注意：runModal() 会自己重排窗口位置，
+    /// 让 NSAlert 弹窗窗口尽量居中并置前。注意：runModal() 会自己重排窗口位置，
     /// 模态会话期间也无法再移动窗口（原生限制）——内容本身是居中的。
+    /// 先激活 App，弹窗才不会躲在别的窗口后面变成"看不见的残留窗口"
+    ///（主窗口是隐藏而非关闭，激活不会把它重新拉出来）。
     static func runModalCentered(_ alert: NSAlert) -> NSApplication.ModalResponse {
+        NSApp.activate(ignoringOtherApps: true)
         alert.window.center()
         return alert.runModal()
     }
@@ -1108,8 +1111,6 @@ final class AppState: NSObject, ObservableObject {
     private var progressIndicator: NSProgressIndicator?
     /// 当前正在进行的 DMG 下载器（供取消）
     private var activeDownloader: DMGDownloader?
-    /// 发现新版本的更新弹窗面板（自定义布局）
-    private var updateDialogPanel: NSPanel?
 
     /// 点进度面板的「取消」：中断下载并关面板。
     @objc func cancelDownload() {
