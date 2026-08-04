@@ -31,7 +31,7 @@
 - **服务器分享** — 勾选已保存的服务器导出成文件（.json），或从分享文件一键导入；导入只接收参数完整的服务器，名称撞车时（服务地址+端口不同）自动改名「-01」防重复，无效/空壳/未保存的草稿自动过滤丢弃
 - **整配置备份** — 本地文件 / WebDAV 两种备份方式；只备份已保存的服务器，WebDAV 密码存系统钥匙串；还原前逐台校验，参数不完整的自动跳过，不让坏数据污染配置
 - **浅色/深色自动适配** — 跟随 macOS 系统外观自动切换
-- **连通性自检** — 启动后自动检测本地端口、国内直连、隧道连通性，结果写在日志里
+- **连通性自检** — 自检按钮任何状态都能点：未启动时预检（TCP 测服务器端口 + DoH 443 可达性），人工确认配置能用了再启动；启动时自动静默检测一次，运行中随时可手动复查完整连通性（本地端口、国内直连、隧道），图标颜色反映实际结果（待检测中性色、检测中黄色、通过绿色、失败红色）
 - **菜单栏常驻 + 程序坞图标开关** — 适合挂后台
 - **开机自启** — 登录 Mac 后自动启动
 - **运行日志** — 界面日志 + 落盘文件（`logs/`，可回溯上次崩溃）
@@ -119,11 +119,11 @@ TOKEN=你的密钥 ./deploy-worker.sh
 # 仅编译当前架构（更快）
 UNIVERSAL=0 ./build.sh
 
-# 3) 打包 DMG
+# 3) 打包 DMG（成品输出到项目根目录 `EchOS-mac-<版本>-universal-x64.dmg`）
 ./make-dmg.sh
 ```
 
-产物：`build/EchOS.app` 或 `build/EchOS-mac-<版本>-universal-x64.dmg`
+产物：`build/EchOS.app`（DMG 由 `make-dmg.sh` 输出到项目根目录，见下）
 
 > `fetch-geodata.sh` 下载过之后会跳过；想强制更新最新数据，删掉 `assets/geoip.dat`
 > 和 `assets/geosite.dat` 再跑一次即可。
@@ -133,38 +133,50 @@ UNIVERSAL=0 ./build.sh
 ## 项目结构
 
 ```
-echos/
+EchOS/
 ├── Worker-ECH.js          # Cloudflare Worker 服务端（完整代码）
 ├── wrangler.toml          # Worker 配置（名称、入口）
 ├── deploy-worker.sh       # 一键部署脚本（wrangler CLI）
 ├── CHANGELOG.md           # 更新日志（发版时自动作为 Release 正文）
 ├── fetch-geodata.sh       # 下载分流数据 geoip.dat / geosite.dat
+├── build.sh               # 编译脚本（通用二进制 / 单一架构）
+├── make-dmg.sh            # DMG 打包脚本（成品输出到项目根目录）
 ├── core/                  # Go 内核 (x-tunnel)
 │   ├── x-tunnel.go        # 入口：参数解析、端口监听、隧道调度
 │   ├── simple_ws.go       # WebSocket 隧道
 │   ├── route_*.go         # 分流规则（geosite / geoip）
 │   └── tun_*.go           # TUN 相关（macOS 未启用）
 ├── gui/                   # SwiftUI 界面
-│   ├── Sources/
-│   │   ├── App.swift           # 入口 + AppDelegate
-│   │   ├── AppState.swift      # 状态管理、内核生命周期
-│   │   ├── Config.swift        # 配置模型、命令行参数
-│   │   ├── ContentView.swift   # 主界面
-│   │   ├── SelfCheck.swift     # 连通性自检
-│   │   ├── SystemProxy.swift   # 系统代理接管
-│   │   ├── StatusBar.swift     # 菜单栏控制器
-│   │   ├── LoginItem.swift     # 开机自启
-│   │   ├── LogFile.swift       # 日志落盘
-│   │   └── ...
 │   ├── Info.plist
-│   └── AppIcon.icns
+│   ├── AppIcon.icns
+│   └── Sources/
+│       ├── App.swift           # 入口 + AppDelegate
+│       ├── AppState.swift      # 状态管理、内核生命周期、系统代理接管/还原
+│       ├── Config.swift        # 配置模型、命令行参数
+│       ├── ContentView.swift   # 主界面
+│       ├── SelfCheck.swift     # 连通性自检（预检 / 完整检测）
+│       ├── SystemProxy.swift   # 系统代理后台接管（SystemProxyWorker actor）
+│       ├── StatusBar.swift     # 菜单栏控制器
+│       ├── LoginItem.swift     # 开机自启
+│       ├── LogFile.swift       # 日志落盘
+│       ├── KernelPID.swift     # 内核进程管理与崩溃恢复
+│       ├── Updater.swift       # 自动更新（检查 / 下载 / 替换 / 重启）
+│       ├── ServerShare.swift   # 服务器分享导出/导入
+│       ├── WebDAVClient.swift  # WebDAV 备份客户端
+│       ├── WebDAVSettingsView.swift # WebDAV 备份设置界面
+│       ├── KeychainStore.swift # 系统钥匙串（WebDAV 密码）
+│       ├── ModeSegment.swift   # 分流模式选择器
+│       ├── PortPicker.swift    # 端口选择
+│       ├── CloudIcon.swift     # 菜单栏云朵图标（代码绘制）
+│       ├── Frosted.swift       # 毛玻璃背景组件
+│       └── ShareSheet.swift    # 分享面板
 ├── assets/                # 分流数据（构建前下载）、DMG 卷图标源文件
 ├── screenshot/            # 界面截图（浅色 / 深色）
-├── build.sh               # 编译脚本
-└── make-dmg.sh            # DMG 打包脚本
+└── .github/workflows/
+    └── release.yml        # 打标签自动构建 DMG 并发 GitHub Release
 ```
 
-> 服务器分享、WebDAV 备份在 v1.1.0 加入。
+> 服务器分享、WebDAV 备份在 v1.1.0 加入；自检预检在 v1.1.10 加入。
 
 ---
 
@@ -174,6 +186,7 @@ echos/
 - 首次启动自动创建一台服务器并弹出「新建服务器名称」命名框；只有点过「保存」的服务器才会写入配置，未保存的服务器退出后自动丢弃
 - 没有 Apple Developer ID 签名，对方首次需要**右键 → 打开**绕过 Gatekeeper
 - 如要彻底消除 Gatekeeper 弹窗，需购买 Apple Developer Program 并签名
+- 发版：推 `v*` 标签自动触发 `.github/workflows/release.yml`，CI 里构建通用二进制、打 DMG 并发布 GitHub Release（正文取 `CHANGELOG.md` 对应版本段落）；不想重复打包时只推目标版本标签即可，中间版本标签保留本地
 
 ## 不传 GitHub 的文件
 
@@ -181,7 +194,8 @@ echos/
 
 | 内容 | 原因 |
 |---|---|
-| `build/`（app、DMG） | 编译产物，由 Actions 发版时自动生成 |
+| `build/`（app、DMG 中间产物） | 编译产物，由 Actions 发版时自动生成 |
+| 根目录 `EchOS-mac-*.dmg` | 本地 `make-dmg.sh` 打出的成品包，不入库 |
 | `assets/geoip.dat`、`assets/geosite.dat` | 24MB 二进制，上游开源数据，构建前用 `fetch-geodata.sh` 下载 |
 | `.DS_Store` | macOS 系统文件 |
 | `config.json`、`logs/` | 用户配置与日志（在用户目录，运行时生成） |
@@ -201,8 +215,13 @@ echos/
 | 1.1.4 | 检查更新全流程弹窗内容全部居中（含下载进度面板） |
 | 1.1.5 | 检查更新弹窗统一原生 NSAlert 居中展示，整理代码 |
 | 1.1.6 | 修复检查更新失败弹窗长文案导致内容左对齐 |
+| 1.1.7 | 启动提速（端口就绪即接管系统代理）、系统代理备份/还原补上 PAC 自动代理 |
+| 1.1.8 | DoH / UDP DNS 拨号 IPv4 优先，修复 IPv6 路由不通时 ECH 公钥查询失败 |
+| 1.1.9 | 启动/停止代理不再卡（系统代理接管挪到后台 actor）、修复 start() 假运行状态、隧道探针失败自动还原系统代理、修复自检重复记录 |
+| 1.1.10 | 自检按钮任何状态可点（未启动预检 / 运行中完整检测）、探针重试间隔优化、自检图标颜色反映真实结果 |
 
-每次 Release 的改动说明优先取 `CHANGELOG.md` 里对应版本的段落，没写则退回自动生成。
+> v1.1.7 – v1.1.10 未单独发版，随 v1.1.10 一起发布，Release 正文含全部改动。
+> 每次 Release 的改动说明优先取 `CHANGELOG.md` 里对应版本的段落，没写则退回自动生成。
 
 ---
 
