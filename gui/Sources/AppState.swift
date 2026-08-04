@@ -548,9 +548,14 @@ final class AppState: NSObject, ObservableObject {
             self.isStarting = false
 
             if !portReady {
-                // 端口一直没就绪：内核可能启动失败
+                // 端口一直没就绪：内核可能启动失败。
+                // 关键：把没能就绪的内核进程清掉。之前这里只标记失败就返回，
+                // 内核进程还活着、占着监听端口 —— 下次启动就报"端口被占用"；
+                // 而且 App 认为没在运行、点按钮只会触发 start() 而不是 stop()，
+                // 等于这个代理关不掉了。
+                self.log("[系统] 代理端口未就绪，内核可能启动失败，正在清理残留内核进程…")
+                await self.stop()
                 self.checkState = .failed("本地代理端口 \(socks.port) 未监听，内核可能未启动成功")
-                self.log("[系统] 代理端口未就绪，内核可能启动失败")
                 return
             }
 
