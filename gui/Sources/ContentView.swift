@@ -130,13 +130,25 @@ struct ContentView: View {
             Text(saveResultText)
         }
         // 启动失败等错误：窗口可能关着，必须弹窗
-        .alert("出错", isPresented: Binding(
+        .alert(app.alertTitle, isPresented: Binding(
             get: { app.alertMessage != nil },
             set: { if !$0 { app.alertMessage = nil } }
         )) {
             Button("好", role: .cancel) { app.alertMessage = nil }
         } message: {
             Text(app.alertMessage ?? "")
+        }
+        // 端口被占用：问一句是否强制结束占用进程后继续启动
+        .alert("端口被占用", isPresented: Binding(
+            get: { app.pendingPortConflict != nil },
+            set: { if !$0 { app.cancelPortConflict() } }
+        )) {
+            Button("取消", role: .cancel) { app.cancelPortConflict() }
+            Button("强制结束并启动", role: .destructive) { app.resolvePortConflictByKilling() }
+        } message: {
+            Text((app.pendingPortConflict.map {
+                "\($0.label) 端口 \($0.port) 被 \($0.name)(PID \($0.pid)) 占用。\n强制结束该进程后将继续启动代理，该进程会立即退出。"
+            }) ?? "")
         }
         .alert("从本地文件还原配置？", isPresented: $confirmRestoreLocal, presenting: pendingRestoreURL) { url in
             Button("取消", role: .cancel) {}
@@ -332,11 +344,15 @@ struct ContentView: View {
                     renaming = true
                 }
                 .disabled(app.isRunning)
-                persistentTint(.green, isActive: !app.isRunning) {
+                persistentTint(app.isServerDirty ? .orange : .green,
+                               isActive: !app.isRunning) {
                     saveSelected()
                 } label: {
                     Text("保存")
                 }
+                .help(app.isServerDirty
+                      ? "有未保存的改动，点一下保存到本地"
+                      : "参数已保存，改动后此按钮会高亮提醒")
                 persistentTint(.red, isActive: !app.isRunning) {
                     confirmDelete = true
                 } label: {

@@ -2,6 +2,10 @@ const WS_READY_STATE_OPEN = 1;
 const WS_READY_STATE_CLOSING = 2;
 const CF_FALLBACK_IPS = ['ProxyIP.CMLiussss.net'];// cm维护
 
+// 代码写死的兜底 token：环境变量 TOKEN 优先，未设置时用此值。
+// 留空 = 要求 App 也必须留空才能连；App 填了任意非空值会被拒绝（401）。
+const DEFAULT_TOKEN = '';
+
 // 复用 TextEncoder，避免重复创建
 const encoder = new TextEncoder();
 
@@ -10,7 +14,7 @@ import { connect } from 'cloudflare:sockets';
 export default {
   async fetch(request, env, ctx) {
     try {
-      const token = env.TOKEN || ''; // 从环境变量读取身份令牌（Cloudflare 后台设置 TOKEN），要和 EchOS 里填的一致
+      const token = env.TOKEN || DEFAULT_TOKEN; // 环境变量优先，代码写死兜底
       const upgradeHeader = request.headers.get('Upgrade');
       
       if (!upgradeHeader || upgradeHeader.toLowerCase() !== 'websocket') {
@@ -19,7 +23,9 @@ export default {
           : new Response('Expected WebSocket', { status: 426 });
       }
 
-      if (token && request.headers.get('Sec-WebSocket-Protocol') !== token) {
+      // 无论 token 是否为空都校验：App 填的必须与服务端生效值完全一致，
+      // 不一致（包括服务端为空而 App 填了值）一律 401 拒绝。
+      if ((request.headers.get('Sec-WebSocket-Protocol') || '') !== token) {
         return new Response('Unauthorized', { status: 401 });
       }
 

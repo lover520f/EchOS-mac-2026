@@ -2,6 +2,15 @@ import Foundation
 import SwiftUI
 import AppKit
 
+/// 启动时被占用的监听端口，以及占着它的进程。弹窗确认要杀谁时用。
+struct PortConflict: Identifiable {
+    var id: Int { port }
+    var label: String      // SOCKS5 / HTTP
+    var port: Int
+    var name: String       // 占用进程名
+    var pid: Int
+}
+
 @MainActor
 final class AppState: NSObject, ObservableObject {
     @Published var config: AppConfig
@@ -17,9 +26,6 @@ final class AppState: NSObject, ObservableObject {
     @Published var systemProxySummary: String = ""
     /// 刚新增/重建了还没起名的服务器，界面据此立刻弹起命名框
     @Published var needsNameInput = false
-    /// 已通过「保存」校验、允许写盘的服务器 ID。
-    /// 未提交的服务器只在内存里存活（可编辑、可切换），退出重开后消失。
-    private var committedIDs: Set<UUID> = []
     @Published var proxyTakenOver = SystemProxy.isActive
     /// WebDAV 上传/下载进行中（用来置灰按钮、防连点）
     @Published var webdavBusy = false
@@ -32,6 +38,9 @@ final class AppState: NSObject, ObservableObject {
     /// 需要弹窗提示的错误（nil = 不弹）。
     /// 菜单栏触发启动失败时窗口可能关着，日志看不到，必须弹窗
     @Published var alertMessage: String?
+    @Published var alertTitle = "出错"
+    /// 启动时发现监听端口被占用，待用户确认是否强制结束占用进程（nil = 无待处理）
+    @Published var pendingPortConflict: PortConflict?
     /// DMG 下载进度 0~1；nil = 没有在下载
     @Published var downloadProgress: Double?
     /// 正在下载分流数据
@@ -42,6 +51,11 @@ final class AppState: NSObject, ObservableObject {
     private var process: Process?
     private var stdoutPipe: Pipe?
     private let maxLogLines = 2000
+    /// 每台服务器「最后一次点保存」时的完整副本，是落盘的唯一数据源。
+    /// config.servers 存的是当前编辑值（界面在编辑时直接改它），
+    /// persist 只写这里的值 —— 未保存的改动绝不会被带进配置文件。
+    /// 是否"有未保存改动"也用它对比：当前编辑值 ≠ 已保存副本即 dirty。
+    @Published private(set) var savedServers: [UUID: ServerConfig] = [:]
     /// 系统代理的接管/还原/查询都在这个 actor 里跑（后台串行），
     /// 否则同步跑几十个 networksetup 子进程会把主线程卡成风火轮。
     private let proxyWorker = SystemProxyWorker()
@@ -57,7 +71,8 @@ final class AppState: NSObject, ObservableObject {
         let cfg = AppConfig.load()
         self.config = cfg
         super.init()
-        committedIDs = Set(cfg.servers.map(\.id))
+        // 磁盘读进来的服务器就是「已保存版本」，作为落盘副本的初始值
+        savedServers = Dictionary(uniqueKeysWithValues: cfg.servers.map { ($0.id, $0) })
         // 读进来时可能做过格式迁移（比如把 host:port 拆成两个字段），
         // 立刻回写一次让文件里也是新格式，免得迁移逻辑一直悬着。
         // 全新安装（还没有配置文件）就不写：保持零配置，等用户第一次操作再落盘。
@@ -119,26 +134,40 @@ final class AppState: NSObject, ObservableObject {
 
     /// 是否还存在没保存过的服务器。有的话不允许新增下一个。
     var hasUncommittedServer: Bool {
-        config.servers.contains { !committedIDs.contains($0.id) }
+        config.servers.contains { savedServers[$0.id] == nil }
     }
 
     /// 该服务器是否已点过「保存」（通过校验、允许写盘）。
     /// 分享导出只导出这种"真实"的服务器，没保存的空壳不往外发。
     func isServerSaved(_ id: UUID) -> Bool {
-        committedIDs.contains(id)
+        savedServers[id] != nil
     }
 
+    /// 当前选中的服务器是否有未保存改动（含从未保存过的情况）。
+    /// 保存按钮据此高亮提醒。直接对比「当前编辑值」与「已保存副本」，
+    /// 改回去也算没改动 —— 删掉一个字符再输回来，值一样就不算 dirty。
+    var isServerDirty: Bool {
+        guard let s = selected else { return false }
+        return savedServers[s.id] != s
+    }
+
+    /// 编辑服务器字段的唯一入口：字段绑定、分流模式、分流规则全走这里。
+    /// 不用手动打标：dirty 由「当前值 != 已保存副本」实时推导。
+    /// TextField 点击聚焦会回调一次 set 写入当前值，值没变自然不算改动。
     func update(_ mutate: (inout ServerConfig) -> Void) {
         guard let idx = selectedIndex else { return }
         mutate(&config.servers[idx])
     }
 
-    /// 落盘：只写「已提交」的服务器和全局偏好。
+    /// 落盘：只写「已保存」的服务器副本。
     /// 未点过「保存」的服务器不持久化 —— 退出、切设置开关等任何保存路径
     /// 都不会把内存里没校验过的服务器带进配置文件。
+    /// 写的是 savedServers 里的已保存副本，不是 config.servers 的当前编辑值 ——
+    /// 界面改了一半没保存的参数，绝不会被这里带进磁盘。
     func persist() {
         var out = config
-        out.servers = config.servers.filter { committedIDs.contains($0.id) }
+        out.servers = config.servers
+            .compactMap { savedServers[$0.id] }
         out.save()
     }
 
@@ -159,7 +188,7 @@ final class AppState: NSObject, ObservableObject {
             log("[系统] 保存失败：\(err)")
             return err
         }
-        committedIDs.insert(config.servers[idx].id)
+        savedServers[config.servers[idx].id] = config.servers[idx]
         persist()
         log("[系统] 服务器配置已保存")
         return nil
@@ -192,7 +221,7 @@ final class AppState: NSObject, ObservableObject {
         copy.name = n
         config.servers.append(copy)
         config.selectedID = copy.id
-        committedIDs.insert(copy.id)
+        savedServers[copy.id] = copy
         persist()
     }
 
@@ -205,16 +234,22 @@ final class AppState: NSObject, ObservableObject {
         guard let idx = selectedIndex else { return "没有选中的服务器" }
         let id = config.servers[idx].id
         if config.servers.contains(where: { $0.id != id && $0.name.trimmingCharacters(in: .whitespaces) == n }) {
-            return "已存在该名称服务器，请重试。"
+            return "已存在该服务器名称，请重试。"
         }
         config.servers[idx].name = n
+        // 重命名要同步进"已保存副本"：persist 只写 savedServers，
+        // 不更新的话退出后名字变回旧值，还会误报"有未保存改动"。
+        if savedServers[id] != nil {
+            savedServers[id]?.name = n
+            persist()
+        }
         return nil
     }
 
     func delete(id: UUID) {
         guard let idx = config.servers.firstIndex(where: { $0.id == id }) else { return }
         config.servers.remove(at: idx)
-        committedIDs.remove(id)
+        savedServers.removeValue(forKey: id)
 
         // 删到一个不剩就补一个空白的。之前是"最后一个不许删"，
         // 可用户想清空重填时只能一个个改字段，很别扭 ——
@@ -328,8 +363,9 @@ final class AppState: NSObject, ObservableObject {
 
     /// 写日志的同时弹窗提示。启动失败这类错误窗口可能关着，
     /// 只看日志用户根本发现不了，必须弹窗。
-    func notify(_ text: String) {
+    func notify(_ text: String, title: String = "出错") {
         log("[系统] \(text)")
+        alertTitle = title
         alertMessage = text
     }
 
@@ -345,23 +381,30 @@ final class AppState: NSObject, ObservableObject {
             || lower.contains("token 不匹配")
             || lower.contains("unauthorized")
             || lower.contains("401") {
-            return "TOKEN 不正确，请检查客户端与服务端设置的是否一致"
+            return "TOKEN 与服务器端不一致"
         }
         if lower.contains("no such host")
             || lower.contains("lookup")
             || lower.contains("找不到主机") {
-            return "服务器地址解析失败，请检查「服务地址」是否填对"
+            // 内核日志用 (IP:xxx) 标注实际拨号目标：填了优选IP/域名就是它，
+            // 没填则显示"自动解析"（此时解析的是服务地址）。据此精确指认字段。
+            if let r = hints.range(of: #"\(IP:[^)]*\)"#, options: .regularExpression) {
+                let label = String(hints[r])
+                return label.contains("自动解析")
+                    ? "服务地址解析失败，请检查「服务地址」"
+                    : "优选IP/域名解析失败，请检查「优选IP/域名」"
+            }
+            return "服务器连接失败"
         }
-        if lower.contains("connection refused") {
-            return "服务器拒绝连接，请检查「服务地址/端口」或确认服务端已部署"
-        }
-        if lower.contains("i/o timeout")
+        if lower.contains("connection refused")
+            || lower.contains("i/o timeout")
             || lower.contains("deadline exceeded")
-            || lower.contains("timed out") {
-            return "连接服务器超时，请稍后重试或换一个优选 IP"
-        }
-        if lower.contains("bad handshake") {
-            return "地址能连上但握手失败，请检查「服务地址」是否为有效的 ECH 服务"
+            || lower.contains("timed out")
+            || lower.contains("bad handshake")
+            || lower.contains("handshake failure")
+            || lower.contains("handshake 失败")
+            || lower.contains("reset by peer") {
+            return "服务器连接失败"
         }
         return nil
     }
@@ -427,6 +470,15 @@ final class AppState: NSObject, ObservableObject {
         guard !isRunning && !isStarting else { return }
         guard let cfg = selected else { notify("请先新增一个服务器"); return }
         if let err = cfg.validate() { notify(err); return }
+        // 有未保存改动就拦住：启动必须用真实已保存的配置，不能带着
+        // 内存里改了一半的参数跑起来。保存按钮会高亮提示当前有改动。
+        if savedServers[cfg.id] != cfg {
+            let reason = savedServers[cfg.id] != nil
+                ? "服务器配置已修改但未保存，请先点「保存」再启动。"
+                : "这台服务器还没有保存过，请先点「保存」再启动。"
+            notify(reason, title: "启动失败")
+            return
+        }
         guard let kernel = kernelPath() else {
             notify("找不到内核程序 x-tunnel，请确认 App 完整"); return
         }
@@ -452,8 +504,10 @@ final class AppState: NSObject, ObservableObject {
                 free = PortPicker.isFree(s.port)
             }
             if !free {
-                if let who = PortPicker.occupant(of: s.port) {
-                    notify("\(label) 端口 \(s.port) 被 \(who) 占用，请关掉它或改用别的监听端口")
+                if let occ = PortPicker.occupant(of: s.port) {
+                    log("[系统] \(label) 端口 \(s.port) 被 \(occ.label) 占用，等待用户确认…")
+                    pendingPortConflict = PortConflict(label: label,
+                                                       port: s.port, name: occ.name, pid: occ.pid)
                     return
                 }
                 log("[系统] \(label) 端口 \(s.port) 预检查未通过（\(PortPicker.lastBindReason)），但没有进程在监听，继续启动")
@@ -517,11 +571,26 @@ final class AppState: NSObject, ObservableObject {
                     if lower.contains("address already in use")
                         || lower.contains("cannot bind")
                         || lower.contains("bind:") {
-                        self.notify("启动失败，端口已被其他程序占用。\n请关掉占用端口的程序，或换个监听端口后重试。")
+                        // 内核 bind 失败：查得到占用者就走弹窗确认（和预检查一致），
+                        // 查不到（如刚释放的 TIME_WAIT）就纯提示。
+                        let conflict = [self.activeSocks, self.activeHTTP]
+                            .compactMap { $0 }
+                            .lazy
+                            .compactMap { ep -> (String, Int, PortPicker.Occupant)? in
+                                guard let o = PortPicker.occupant(of: ep.port) else { return nil }
+                                let label = (ep.port == self.activeSocks?.port) ? "SOCKS5" : "HTTP"
+                                return (label, ep.port, o)
+                            }.first
+                        if let (label, port, o) = conflict {
+                            self.log("[系统] \(label) 端口 \(port) 被 \(o.label) 占用，等待用户确认…")
+                            self.pendingPortConflict = PortConflict(label: label, port: port, name: o.name, pid: o.pid)
+                        } else {
+                            self.notify("端口暂时无法绑定，请稍后重试或换个监听端口。", title: "启动失败")
+                        }
                     } else if let hint = self.serverFailureHint() {
-                        self.notify("启动失败：\(hint)")
+                        self.notify(hint, title: "启动失败")
                     } else {
-                        self.notify("启动失败，请查看运行日志")
+                        self.notify("请查看运行日志", title: "启动失败")
                     }
                 }
             }
@@ -595,9 +664,9 @@ final class AppState: NSObject, ObservableObject {
                 // 启动失败要弹一次窗点明原因，别让人一头雾水反复点启动。
                 // serverFailureHint 从内核日志里认字，识别不了就走通用文案。
                 if let hint = self.serverFailureHint() {
-                    self.notify("启动失败：\(hint)")
+                    self.notify(hint, title: "启动失败")
                 } else {
-                    self.notify("启动失败，请查看运行日志")
+                    self.notify("请查看运行日志", title: "启动失败")
                 }
                 return
             }
@@ -637,13 +706,38 @@ final class AppState: NSObject, ObservableObject {
         }
     }
 
+    /// 用户确认强制结束占用进程后：杀掉 → 等端口释放 → 重新走一遍启动。
+    /// 这属于用户明确的"帮我解决它"操作，杀错了责任在确认弹窗上，这里只管做。
+    func resolvePortConflictByKilling() {
+        guard let c = pendingPortConflict else { return }
+        pendingPortConflict = nil
+        log("[系统] 正在结束占用端口的进程 \(c.name)(PID \(c.pid))…")
+        guard PortPicker.kill(pid: c.pid) else {
+            notify("无法结束进程 \(c.name)(PID \(c.pid))，请手动关闭后再启动", title: "启动失败")
+            return
+        }
+        // 给端口一点时间真正释放，再重新启动
+        for _ in 0..<10 {
+            if PortPicker.isFree(c.port) { break }
+            usleep(100_000)
+        }
+        log("[系统] \(c.label) 端口 \(c.port) 已释放，重新启动代理")
+        start()
+    }
+
+    /// 用户取消：不杀进程，也不启动，保持停止状态
+    func cancelPortConflict() {
+        guard pendingPortConflict != nil else { return }
+        pendingPortConflict = nil
+        log("[系统] 已取消启动")
+    }
+
     func stop() async {
         isStarting = false
         if proxyTakenOver { disableSystemProxy() }
         guard let p = process else { isRunning = false; return }
         p.terminationHandler = nil
         p.terminate()
-
         // 等它真的退出再往下走。SIGTERM 只是"请你退出"，进程还要一点时间收尾；
         // 之前发完信号就立刻返回，用户切换模式时紧接着点启动，
         // 就会撞上尚未释放的端口，报"端口 30000 已被占用"。
@@ -870,7 +964,7 @@ final class AppState: NSObject, ObservableObject {
     /// 把选中的服务器导出成分享文件。只导出点过「保存」的服务器，
     /// 没保存的空壳服务器（参数不全）不往外发。
     func exportSelectedServers(_ ids: Set<UUID>, to url: URL) {
-        let servers = config.servers.filter { ids.contains($0.id) && committedIDs.contains($0.id) }
+        let servers = config.servers.filter { ids.contains($0.id) && savedServers[$0.id] != nil }
         let enc = JSONEncoder()
         enc.outputFormatting = [.prettyPrinted, .sortedKeys]
         do {
@@ -899,7 +993,7 @@ final class AppState: NSObject, ObservableObject {
             var skipped = 0
             var renamed = 0
             // 已保存服务器的名称集合，名称不允许重复
-            var names = Set(config.servers.filter { committedIDs.contains($0.id) }
+            var names = Set(config.servers.filter { savedServers[$0.id] != nil }
                 .map { $0.name.trimmingCharacters(in: .whitespaces) })
             for var s in file.servers {
                 // 1) 参数不完整（不含 token，token 可选）→ 无效，过滤
@@ -912,7 +1006,7 @@ final class AppState: NSObject, ObservableObject {
                 if names.contains(baseName) {
                     // 2) 名称撞车：看服务地址+端口是不是完全一样
                     let sameTarget = config.servers.contains { existing in
-                        committedIDs.contains(existing.id)
+                        savedServers[existing.id] != nil
                             && existing.name.trimmingCharacters(in: .whitespaces) == baseName
                             && existing.server.trimmingCharacters(in: .whitespaces) == s.server.trimmingCharacters(in: .whitespaces)
                             && existing.serverPort == s.serverPort
@@ -929,13 +1023,13 @@ final class AppState: NSObject, ObservableObject {
                 }
                 s.id = UUID()
                 config.servers.append(s)
-                committedIDs.insert(s.id)   // 导入即视为已保存，可立即使用
+                savedServers[s.id] = s   // 导入即视为已保存，可立即使用
                 names.insert(s.name.trimmingCharacters(in: .whitespaces))
                 added += 1
             }
             // 3) 删除所有未保存的服务器（空壳/未完成草稿）
             let before = config.servers.count
-            config.servers.removeAll { !committedIDs.contains($0.id) }
+            config.servers.removeAll { savedServers[$0.id] == nil }
             let removedDrafts = before - config.servers.count
             if removedDrafts > 0 {
                 log("[系统] 已删除 \(removedDrafts) 台未保存的空服务器")
@@ -972,9 +1066,10 @@ final class AppState: NSObject, ObservableObject {
 
     /// 备份前的"干净配置"：只留点过「保存」的服务器，未保存的草稿不进备份，
     /// 免得还原到别的机器上混进一堆空壳。
+    /// 注意：备份导出的是已保存副本（savedServers），不是带未保存改动的编辑值。
     private var cleanConfig: AppConfig {
         var out = config
-        out.servers = config.servers.filter { committedIDs.contains($0.id) }
+        out.servers = config.servers.compactMap { savedServers[$0.id] }
         return out
     }
 
@@ -1025,7 +1120,7 @@ final class AppState: NSObject, ObservableObject {
             c.selectedID = c.servers.first?.id
         }
         config = c
-        committedIDs = Set(c.servers.map(\.id))   // 还原的服务器一律视为已保存
+        savedServers = Dictionary(uniqueKeysWithValues: c.servers.map { ($0.id, $0) })   // 还原的服务器一律视为已保存
         persist()
         rulesDirty = false
         applyDockIconPolicy()
@@ -1112,7 +1207,7 @@ final class AppState: NSObject, ObservableObject {
         // 只有已保存过服务器、或本来就有配置文件时才落盘：
         // 全新安装啥都没保存就退出，不凭空生成配置文件（否则下次启动
         // 会被当成"空配置"而不是"全新安装"，命名框就不会弹了）。
-        if !committedIDs.isEmpty || FileManager.default.fileExists(atPath: AppConfig.fileURL.path) {
+        if !savedServers.isEmpty || FileManager.default.fileExists(atPath: AppConfig.fileURL.path) {
             persist()
         }
         LogFile.close()

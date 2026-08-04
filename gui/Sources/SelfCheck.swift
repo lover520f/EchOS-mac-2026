@@ -107,13 +107,14 @@ enum SelfCheck {
 
         let dialHost = ServerConfig.cleanHost(config.ip.isEmpty ? config.server : config.ip)
         if dialHost.isEmpty {
-            results.append(Result(title: "服务端地址", ok: false, note: "未填写服务地址或优选IP"))
+            results.append(Result(title: "服务端地址", ok: false, note: "未填写服务地址或优选IP/域名"))
         } else {
             let (ok, cost, note) = await tcpCheck(host: dialHost, port: config.serverPort, timeout: 4)
             results.append(Result(
                 title: "服务端 \(dialHost):\(config.serverPort)",
                 ok: ok,
-                note: ok ? String(format: "%.0f 毫秒", cost * 1000) : "失败：\(note)"))
+                note: ok ? String(format: "%.0f 毫秒", cost * 1000)
+                         : "失败：\(note)（请检查服务地址/优选IP/域名是否填对）"))
         }
 
         // DoH 才走 TCP；UDP DNS 没有可测的 TCP 连接

@@ -55,9 +55,16 @@ enum PortPicker {
 }
 
 extension PortPicker {
+    /// 占着端口的进程：名字 + PID，弹窗确认要杀谁时用得上。
+    struct Occupant {
+        var name: String
+        var pid: Int
+        var label: String { "\(name)(PID \(pid))" }
+    }
+
     /// 查出是哪个进程占着这个端口。
     /// "端口被占用"这句话本身没法让人往下走一步，得说清楚是谁占的。
-    static func occupant(of port: Int) -> String? {
+    static func occupant(of port: Int) -> Occupant? {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
         p.arguments = ["-nP", "-iTCP:\(port)", "-sTCP:LISTEN"]
@@ -72,7 +79,19 @@ extension PortPicker {
             .split(separator: "\n").dropFirst()      // 首行是表头
         guard let first = lines.first else { return nil }
         let cols = first.split(separator: " ", omittingEmptySubsequences: true)
-        guard cols.count >= 2 else { return nil }
-        return "\(cols[0])(PID \(cols[1]))"
+        guard cols.count >= 2, let pid = Int(cols[1]) else { return nil }
+        return Occupant(name: String(cols[0]), pid: pid)
+    }
+
+    /// 强制结束占用进程。返回是否真的结束了（SIGKILL 后确认进程不存在）。
+    /// 杀掉的是别的软件时要谨慎，但这里是用户明确确认过的操作。
+    static func kill(pid: Int) -> Bool {
+        guard pid > 0, Darwin.kill(pid_t(pid), SIGKILL) == 0 else { return false }
+        // 给系统一点时间回收进程，再确认它确实没了
+        for _ in 0..<20 {
+            if Darwin.kill(pid_t(pid), 0) != 0 { return true }   // 信号发不过去 = 进程已消失
+            usleep(50_000)
+        }
+        return false
     }
 }
