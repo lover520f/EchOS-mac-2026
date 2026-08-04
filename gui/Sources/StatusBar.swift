@@ -61,7 +61,9 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         // 形状本身就能分辨状态，不必只依赖颜色。
         let img = CloudIcon.make(filled: running, size: 18)
         button.image = img.tinted(Self.color(running: running))
-        button.toolTip = running ? "ECH 代理已运行" : "ECH 代理未运行"
+        // 不设 toolTip：无 Dock 图标（accessory 模式）下，鼠标悬停后
+        // tooltip 面板可能不消失，卡成菜单栏下方一个点不掉、点不动的幽灵窗。
+        button.toolTip = nil
     }
 
     static func color(running: Bool) -> NSColor { running ? onColor : offColor }

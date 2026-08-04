@@ -333,6 +333,39 @@ final class AppState: NSObject, ObservableObject {
         alertMessage = text
     }
 
+    /// 从最近的内核日志里识别「服务器侧」的失败原因，返回给用户看的简短说明。
+    /// 识别不出来返回 nil（本地原因走通用提示）。只读日志，不改任何状态。
+    ///
+    /// 弹窗文案要短：SwiftUI 的 alert 长了会换行、排版不居中，
+    /// 所以这里每一条都压在一行以内。
+    private func serverFailureHint() -> String? {
+        let hints = Array(logLines.suffix(30)).joined(separator: "\n")
+        let lower = hints.lowercased()
+        if lower.contains("认证失败")
+            || lower.contains("token 不匹配")
+            || lower.contains("unauthorized")
+            || lower.contains("401") {
+            return "TOKEN 不正确，请检查客户端与服务端设置的是否一致"
+        }
+        if lower.contains("no such host")
+            || lower.contains("lookup")
+            || lower.contains("找不到主机") {
+            return "服务器地址解析失败，请检查「服务地址」是否填对"
+        }
+        if lower.contains("connection refused") {
+            return "服务器拒绝连接，请检查「服务地址/端口」或确认服务端已部署"
+        }
+        if lower.contains("i/o timeout")
+            || lower.contains("deadline exceeded")
+            || lower.contains("timed out") {
+            return "连接服务器超时，请稍后重试或换一个优选 IP"
+        }
+        if lower.contains("bad handshake") {
+            return "地址能连上但握手失败，请检查「服务地址」是否为有效的 ECH 服务"
+        }
+        return nil
+    }
+
     func log(_ text: String) {
         // 级别选「关闭」就是真的什么都不记：界面不显示，文件也不写。
         // 代价是出问题时没有记录可查，但这是用户明确要的行为 ——
@@ -485,8 +518,10 @@ final class AppState: NSObject, ObservableObject {
                         || lower.contains("cannot bind")
                         || lower.contains("bind:") {
                         self.notify("启动失败，端口已被其他程序占用。\n请关掉占用端口的程序，或换个监听端口后重试。")
+                    } else if let hint = self.serverFailureHint() {
+                        self.notify("启动失败：\(hint)")
                     } else {
-                        self.notify("启动失败，请查看下方运行日志中的错误信息后重试。")
+                        self.notify("启动失败，请查看运行日志")
                     }
                 }
             }
@@ -556,6 +591,14 @@ final class AppState: NSObject, ObservableObject {
                 self.log("[系统] 代理端口未就绪，内核可能启动失败，正在清理残留内核进程…")
                 await self.stop()
                 self.checkState = .failed("本地代理端口 \(socks.port) 未监听，内核可能未启动成功")
+                // 服务器侧的原因（TOKEN 错、地址不通）用户从日志里看不出来，
+                // 启动失败要弹一次窗点明原因，别让人一头雾水反复点启动。
+                // serverFailureHint 从内核日志里认字，识别不了就走通用文案。
+                if let hint = self.serverFailureHint() {
+                    self.notify("启动失败：\(hint)")
+                } else {
+                    self.notify("启动失败，请查看运行日志")
+                }
                 return
             }
 
