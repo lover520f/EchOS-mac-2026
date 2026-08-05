@@ -518,7 +518,7 @@ final class AppState: NSObject, ObservableObject {
 
         // 分流数据：优先用更新下载到数据目录的新版，没有再退回 App 内置
         var geoip: String?, geosite: String?
-        if cfg.routeMode.needsGeoData {
+        if config.routeMode.needsGeoData {
             geoip = Updater.geoDataPath(for: "geoip.dat")
                 ?? Bundle.main.path(forResource: "geoip", ofType: "dat")
             geosite = Updater.geoDataPath(for: "geosite.dat")
@@ -535,7 +535,7 @@ final class AppState: NSObject, ObservableObject {
 
         let p = Process()
         p.executableURL = URL(fileURLWithPath: kernel)
-        p.arguments = cfg.arguments(listen: listen, geoip: geoip, geosite: geosite)
+        p.arguments = cfg.arguments(listen: listen, geoip: geoip, geosite: geosite, mode: config.routeMode)
         let pipe = Pipe()
         p.standardOutput = pipe
         p.standardError = pipe
@@ -622,14 +622,15 @@ final class AppState: NSObject, ObservableObject {
         checkState = .running
         log("[系统] 正在等待代理端口就绪…")
         Task { @MainActor in
-            guard let socks = self.activeSocks, let mode = self.selected?.routeMode else {
-                // activeSocks/mode 取不到（服务器被删、端口配置丢了等极端情况），
+            guard let socks = self.activeSocks else {
+                // activeSocks 取不到（服务器被删、端口配置丢了等极端情况），
                 // 绝不该假装"运行中"——否则界面亮绿灯而内核早就没了。
                 // 这里只负责收尾状态，等 terminationHandler 统一处置内核。
                 self.checkState = .idle
                 self.isStarting = false
                 return
             }
+            let mode = self.config.routeMode
 
             // 1) 等本地端口开始监听（内核起来、隧道就绪才监听）。
             //    上限 10 秒，和内核 WaitForChannelReady(10s) 对齐：慢隧道也能等到。
@@ -776,12 +777,14 @@ final class AppState: NSObject, ObservableObject {
 
     func toggle() async { (isRunning || isStarting) ? await stop() : start() }
 
-    /// 切换分流模式。运行中切换会自动重启内核 ——
-    /// 分流规则是启动时作为命令行参数传给内核的，改了不重启根本不会生效；
-    /// 要么禁止运行中切换（用户会觉得莫名其妙），要么切了就替他重启。
+    /// 切换分流模式。分流模式是全局参数（AppConfig.routeMode），切换立即
+    /// 落盘，与 autoSystemProxy / logLevel 这些全局开关一致 —— 不像服务器
+    /// 参数那样要等点「保存」。分流规则是启动时作为命令行参数传给内核的，
+    /// 运行中切换自动重启内核让其生效（会短暂断开）。
     func switchRouteMode(_ mode: RouteMode) async {
-        guard selected?.routeMode != mode else { return }
-        update { $0.routeMode = mode }
+        guard config.routeMode != mode else { return }
+        config.routeMode = mode
+        persist()
 
         guard isRunning else { return }
         log("[系统] 分流模式已切换为「\(mode.title)」，正在重启代理（会短暂断开）…")
@@ -816,7 +819,7 @@ final class AppState: NSObject, ObservableObject {
         if !silent { log("[自检] 开始检测…") }
 
         // 代理没在跑：没有本地端口可测，走预检分支。
-        guard (isRunning || isStarting), let socks = activeSocks, let mode = selected?.routeMode else {
+        guard (isRunning || isStarting), let socks = activeSocks else {
             guard let cfg = selected else {
                 checking = false
                 if !silent { log("[自检] 请先添加并选中服务器") }
@@ -842,6 +845,7 @@ final class AppState: NSObject, ObservableObject {
         }
 
         Task { @MainActor in
+            let mode = config.routeMode
             async let probe = SelfCheck.run(socks: socks, mode: mode)
             // 至少让"检测中"显示 800 毫秒。检测本身可能几百毫秒就完了，
             // 灯一闪而过等于没有反馈，用户只会觉得"它根本没检测"。

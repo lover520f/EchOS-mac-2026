@@ -304,8 +304,6 @@ struct ServerConfig: Codable, Identifiable, Equatable {
     /// -insecure 忽略证书校验
     var insecure: Bool = false
 
-    /// 分流模式。Windows 上这层是 v2rayN 干的，Mac 版内置。
-    var routeMode: RouteMode = .bypassCN
     /// 自定义分流规则，优先级高于分流模式自带的规则
     var customRules: [CustomRule] = []
 
@@ -350,7 +348,6 @@ struct ServerConfig: Codable, Identifiable, Equatable {
         ips = s(.ips, "")
         fallback = b(.fallback, false)
         insecure = b(.insecure, false)
-        routeMode = ((try? c.decodeIfPresent(RouteMode.self, forKey: .routeMode)) ?? nil) ?? .bypassCN
         customRules = ((try? c.decodeIfPresent([CustomRule].self, forKey: .customRules)) ?? nil) ?? []
     }
 
@@ -446,7 +443,8 @@ struct ServerConfig: Codable, Identifiable, Equatable {
 
     /// 组装内核命令行参数。逻辑对齐 Windows 版 StartProcess()，
     /// 额外补上 Mac 版特有的分流参数（Windows 上这部分由 v2rayN 负责）。
-    func arguments(listen: String? = nil, geoip: String? = nil, geosite: String? = nil) -> [String] {
+    /// 拼内核启动参数。分流模式是全局参数（AppConfig.routeMode），由调用方传入。
+    func arguments(listen: String? = nil, geoip: String? = nil, geosite: String? = nil, mode: RouteMode) -> [String] {
         var args: [String] = []
         func add(_ flag: String, _ value: String) {
             let v = value.trimmingCharacters(in: .whitespaces)
@@ -461,11 +459,11 @@ struct ServerConfig: Codable, Identifiable, Equatable {
             guard let cond = r.kernelCondition else { return nil }
             return "\(r.action),\(cond)"
         }.joined(separator: ";")
-        let base = routeMode.baseRoute
+        let base = mode.baseRoute
         let route = custom.isEmpty ? base : (base.isEmpty ? custom : custom + ";" + base)
-        args += ["-default", routeMode.defaultRoute, "-route", route]
+        args += ["-default", mode.defaultRoute, "-route", route]
 
-        if routeMode.needsGeoData {
+        if mode.needsGeoData {
             if let geoip { add("-geoip", geoip) }
             if let geosite { add("-geosite", geosite) }
         }
@@ -577,6 +575,9 @@ struct AppConfig: Codable {
     /// 是否在程序坞显示图标。关掉就只剩菜单栏图标，适合常驻后台。
     /// 默认关闭 —— 菜单栏已有完整功能，不需要在程序坞再占一个位置。
     var showDockIcon: Bool = false
+    /// 全局分流模式：无论选中哪台服务器都遵从此设置（v1.1.12 起从
+    /// 服务器级参数迁到 App 级，切换立即生效并落盘）。
+    var routeMode: RouteMode = .bypassCN
     /// 底部日志面板是否展开
     var logVisible: Bool = true
     /// WebDAV 备份目标（密码在钥匙串里）
@@ -594,6 +595,7 @@ struct AppConfig: Codable {
         showDiagnosticLogs = b(.showDiagnosticLogs, false)
         logLevel = ((try? c.decodeIfPresent(LogLevel.self, forKey: .logLevel)) ?? nil) ?? .info
         showDockIcon = b(.showDockIcon, false)
+        routeMode = ((try? c.decodeIfPresent(RouteMode.self, forKey: .routeMode)) ?? nil) ?? .bypassCN
         logVisible = b(.logVisible, true)
         webdav = (try? c.decodeIfPresent(WebDAVConfig.self, forKey: .webdav)) ?? nil
     }

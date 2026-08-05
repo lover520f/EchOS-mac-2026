@@ -448,7 +448,7 @@ struct ContentView: View {
 
                     ModeSegment(
                         selection: Binding(
-                            get: { app.selected?.routeMode ?? .bypassCN },
+                            get: { app.config.routeMode },
                             set: { v in Task { await app.switchRouteMode(v) } }
                         ),
                         disabled: false
