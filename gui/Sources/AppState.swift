@@ -27,6 +27,10 @@ final class AppState: NSObject, ObservableObject {
     /// 刚新增/重建了还没起名的服务器，界面据此立刻弹起命名框
     @Published var needsNameInput = false
     @Published var proxyTakenOver = SystemProxy.isActive
+    /// 系统代理是否已**成功接管**（enable 执行完且验证通过）。
+    /// 与 proxyTakenOver（从标记接管那一刻起就为 true）不同，这个只在
+    /// 真正设置成功后才变 true —— 菜单栏图标据此才变蓝，避免"说好了其实没成"。
+    @Published var proxyReady = SystemProxy.isActive
     /// WebDAV 上传/下载进行中（用来置灰按钮、防连点）
     @Published var webdavBusy = false
 
@@ -105,6 +109,7 @@ final class AppState: NSObject, ObservableObject {
                 let warnings = await proxyWorker.restore()
                 warnings.forEach { log("[系统代理] \($0)") }
                 proxyTakenOver = false
+                proxyReady = false
                 log("[系统代理] 已把系统代理还原回你原来的设置")
             }
             recovered = true
@@ -271,12 +276,17 @@ final class AppState: NSObject, ObservableObject {
         delete(id: s.id)
     }
 
-    func select(_ id: UUID) {
-        guard !isRunning && !isStarting else { return }
-        // 只切换内存中的选中项，不落盘 —— 这里一 save 会把还没通过「必填」校验的
-        // 服务器整份写进配置（Picker 的 set 在界面刷新时会回调到这里）。
-        // 选中状态等下一次真正保存时一并持久化。
+    /// 切换选中的服务器。运行中切换会重启代理用新服务器生效（会短暂断开）——
+    /// 否则光改选中项、连的还是旧服务器，用户会以为切换坏了。
+    /// 不落盘：选中状态等下一次真正保存时一并持久化（避免把还没通过「必填」
+    /// 校验的服务器写进配置，Picker 的 set 在界面刷新时会回调到这里）。
+    func select(_ id: UUID) async {
+        let prev = config.selectedID
         config.selectedID = id
+        guard isRunning, prev != id else { return }
+        log("[系统] 已切换服务器，正在重启代理（会短暂断开）…")
+        await stop()
+        start()
     }
 
     // MARK: - 自定义分流规则
@@ -898,15 +908,18 @@ final class AppState: NSObject, ObservableObject {
         // 先标记再异步接管：万一接管还没跑完用户就点停止，stop() 里依然能
         // 看到 proxyTakenOver=true 而去还原系统代理，不会把代理漏在系统里。
         proxyTakenOver = true
+        proxyReady = false   // 接管中 → 图标不该蓝
         let socks = activeSocks.map { SystemProxyWorker.Endpoint(host: $0.host, port: $0.port) }
         let http = activeHTTP.map { SystemProxyWorker.Endpoint(host: $0.host, port: $0.port) }
         Task {
             do {
                 let warnings = try await proxyWorker.enable(socks: socks, http: http)
                 warnings.forEach { log("[系统代理] \($0)") }
+                proxyReady = true   // 设置成功、验证通过，才亮蓝
                 log("[系统代理] 浏览器等程序已自动走本工具")
             } catch {
                 proxyTakenOver = false
+                proxyReady = false
                 log("[系统代理] 自动设置失败：\(error.localizedDescription)")
             }
             refreshProxySummary()
@@ -935,6 +948,7 @@ final class AppState: NSObject, ObservableObject {
 
     func disableSystemProxy() {
         proxyTakenOver = false
+        proxyReady = false
         Task {
             let warnings = await proxyWorker.restore()
             warnings.forEach { log("[系统代理] \($0)") }
@@ -1277,7 +1291,12 @@ final class AppState: NSObject, ObservableObject {
     static func runModalCentered(_ alert: NSAlert) -> NSApplication.ModalResponse {
         NSApp.activate(ignoringOtherApps: true)
         alert.window.center()
-        return alert.runModal()
+        let resp = alert.runModal()
+        // 模态结束立即隐藏窗口：accessory（无 Dock 图标）模式下模态窗口
+        // 有时不会自动消失，会残留成菜单栏下方的透明幽灵窗——一次弹窗留
+        // 一个、越积越多（每个都占着屏幕上的一个空位，点不掉）。
+        alert.window.orderOut(nil)
+        return resp
     }
 
     /// 单一按钮的信息弹窗（检查更新的"已是最新/失败/未配置"结果）。

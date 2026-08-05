@@ -22,10 +22,16 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         item.menu = menu
         statusItem = item
 
-        // 运行状态一变，菜单栏图标跟着变色，不用等用户点开菜单
+        // 运行状态 / 系统代理接管状态一变，菜单栏图标跟着变色，不用等用户点开菜单。
+        // 蓝色只表示"代理已真正接管成功"（proxyReady），避免图标先变蓝但系统代理
+        // 其实没设置上 —— 用户看到的蓝就该是真的好了。
         state.$isRunning
             .receive(on: RunLoop.main)
-            .sink { [weak self] running in self?.applyIcon(running: running) }
+            .sink { [weak self] _ in self?.refreshIcon() }
+            .store(in: &cancellables)
+        state.$proxyReady
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.refreshIcon() }
             .store(in: &cancellables)
 
         // 监听程序坞图标可见性变化，同步菜单勾选状态
@@ -39,7 +45,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
             }
             .store(in: &cancellables)
 
-        applyIcon(running: state.isRunning)
+        applyIcon(ready: state.proxyReady)
 
         // 菜单栏项在某些环境下会创建失败（比如菜单栏满了），这时得让用户知道，
         // 否则关掉窗口就再也找不到这个软件了。
@@ -50,38 +56,43 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         }
     }
 
-    /// Cloudflare 橙黄 = 未运行，蓝色 = 已运行
+    /// Cloudflare 橙黄 = 未接管成功，蓝色 = 系统代理已接管成功
     static let offColor = NSColor(srgbRed: 0.965, green: 0.510, blue: 0.122, alpha: 1) // #F6821F
     static let onColor  = NSColor(srgbRed: 0.125, green: 0.478, blue: 1.000, alpha: 1) // #207AFF
 
-    private func applyIcon(running: Bool) {
+    private func refreshIcon() {
+        applyIcon(ready: state?.proxyReady ?? false)
+    }
+
+    private func applyIcon(ready: Bool) {
         guard let button = statusItem?.button else { return }
 
-        // 云朵用代码画（见 CloudIcon）：空心=停止、实心=运行。
+        // 云朵用代码画（见 CloudIcon）：空心=未接管、实心=已接管。
         // 形状本身就能分辨状态，不必只依赖颜色。
-        let img = CloudIcon.make(filled: running, size: 18)
-        button.image = img.tinted(Self.color(running: running))
+        let img = CloudIcon.make(filled: ready, size: 18)
+        button.image = img.tinted(Self.color(ready: ready))
         // 不设 toolTip：无 Dock 图标（accessory 模式）下，鼠标悬停后
         // tooltip 面板可能不消失，卡成菜单栏下方一个点不掉、点不动的幽灵窗。
         button.toolTip = nil
     }
 
-    static func color(running: Bool) -> NSColor { running ? onColor : offColor }
+    static func color(ready: Bool) -> NSColor { ready ? onColor : offColor }
 
     // 每次点开都重建，保证状态和服务器列表都是最新的
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
         guard let state else { return }
+        let ready = state.proxyReady
         let running = state.isRunning
 
-        // 状态行：一个圆点 + 一句话，不堆细节
+        // 状态行：一个圆点 + 一句话，不堆细节。蓝色=已接管成功，与图标一致。
         let status = NSMenuItem(title: "", action: nil, keyEquivalent: "")
         let dot = NSAttributedString(
-            string: running ? "● " : "○ ",
-            attributes: [.foregroundColor: Self.color(running: running),
+            string: ready ? "● " : "○ ",
+            attributes: [.foregroundColor: Self.color(ready: ready),
                          .font: NSFont.systemFont(ofSize: 13)])
         let text = NSAttributedString(
-            string: running ? "ECH 代理已运行" : "ECH 代理未运行",
+            string: ready ? "系统代理已接管" : (state.isRunning ? "代理运行中，系统代理未接管" : "ECH 代理未运行"),
             attributes: [.foregroundColor: NSColor.labelColor,
                          .font: NSFont.systemFont(ofSize: 12, weight: .medium)])
         let line = NSMutableAttributedString()
@@ -104,8 +115,8 @@ final class StatusBarController: NSObject, NSMenuDelegate {
             mi.target = self
             mi.representedObject = s.id
             mi.state = (s.id == state.selected?.id) ? .on : .off
-            // 运行中切服务器会让连接和配置对不上，直接禁掉
-            mi.isEnabled = !running
+            // 运行中切换服务器会重启代理换到新服务器生效（见 AppState.select）
+            mi.isEnabled = true
             sub.addItem(mi)
         }
         serverItem.submenu = sub
@@ -142,8 +153,10 @@ final class StatusBarController: NSObject, NSMenuDelegate {
             NSApp.setActivationPolicy(.regular)
         }
         NSApp.activate(ignoringOtherApps: true)
-        for w in NSApp.windows where w.contentView != nil {
-            w.makeKeyAndOrderFront(nil)
+        // 只把主窗口拉出来。不能遍历 NSApp.windows 全部 orderFront——
+        // 历史残留的隐藏空窗（accessory 模态的幽灵窗）会被一起显示出来。
+        if let win = NSApp.windows.first(where: { $0.contentView != nil }) {
+            win.makeKeyAndOrderFront(nil)
         }
     }
 
@@ -162,7 +175,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
 
     @objc private func pickServer(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? UUID else { return }
-        state?.select(id)
+        Task { await state?.select(id) }
     }
 
     /// 菜单栏的「检查更新」：同时检查软件新版本和分流数据

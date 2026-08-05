@@ -65,6 +65,77 @@ enum SystemProxy {
             .filter { !$0.isEmpty && !$0.hasPrefix("*") }
     }
 
+    /// 取默认路由所在的网络接口（如 en0）。查询只读，不需要权限。
+    /// route 万一挂起（个别系统状态），5 秒后强制结束，调用方会退回全部服务，
+    /// 不会把接管流程卡死 —— 之前教训：在后台/actor 上下文里挂起会让接管永久排队。
+    private static func defaultRouteInterface() -> String? {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/sbin/route")
+        p.arguments = ["-n", "get", "default"]
+        let out = Pipe()
+        p.standardOutput = out
+        do { try p.run() } catch { return nil }
+        DispatchQueue.global().asyncAfter(deadline: .now() + 5) {
+            if p.isRunning { p.terminate() }
+        }
+        let text = String(data: out.fileHandleForReading.readDataToEndOfFile(),
+                          encoding: .utf8) ?? ""
+        for line in text.split(separator: "\n") {
+            if let range = line.range(of: "interface:") {
+                return line[range.upperBound...].trimmingCharacters(in: .whitespaces)
+            }
+        }
+        return nil
+    }
+
+    /// 从 listnetworkserviceorder 解析出「设备(en0/en1) → 服务名」映射。
+    private static func deviceToService() throws -> [String: String] {
+        let text = (try? run(["-listnetworkserviceorder"])) ?? ""
+        var map: [String: String] = [:]
+        var lastService = ""
+        for raw in text.split(separator: "\n") {
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            if line.hasPrefix("(") {
+                lastService = line.components(separatedBy: ")").last?
+                    .trimmingCharacters(in: .whitespaces) ?? ""
+            } else if lastService.isEmpty == false,
+                      line.contains("Hardware Port:"),
+                      let devPart = line.split(separator: ",").last?
+                          .trimmingCharacters(in: .whitespaces) {
+                let dev = devPart.replacingOccurrences(of: "Device:", with: "")
+                    .trimmingCharacters(in: .whitespaces)
+                if !dev.isEmpty { map[dev] = lastService }
+            }
+        }
+        return map
+    }
+
+    /// 当前真正在用的网络服务：默认路由所在接口对应的那一个。
+    /// 只对它设置系统代理，跳过没连接/没在用的服务（又快、又不会给将来才
+    /// 连上的接口留下旧代理设置）。解析不到时退回全部服务。
+    static func activeNetworkServices() throws -> [String] {
+        let all = try networkServices()
+        // 解析不到默认路由 → 退回全部（保持原有兜底行为）。
+        guard let iface = defaultRouteInterface() else { return all }
+
+        // 默认路由在虚拟接口（utun/tap/ppp/ipsec…）= 有 VPN 在跑。
+        // 此时再给系统代理动手既和 VPN 抢流量、又可能把 VPN 自己设的代理顶掉，
+        // 保守起见返回空 → enable 视为「不可接管」，宁可不动也绝不去搅乱 VPN。
+        let vpnPrefix = ["utun", "tap", "ppp", "ipsec", "ipsec0", "lo0"]
+        if vpnPrefix.contains(where: iface.hasPrefix) {
+            return []
+        }
+
+        // 正常：默认路由在物理接口（en0/en1...），只对那一个服务设置系统代理，
+        // 跳过没连接、没在用的服务（又快、又不会给将来才连上的接口留下旧代理）。
+        guard let map = try? deviceToService(),
+              let svc = map[iface], !svc.isEmpty,
+              all.contains(svc) else {
+            return all
+        }
+        return [svc]
+    }
+
     private static func parseEntry(_ text: String) -> ProxyBackup.Entry {
         var e = ProxyBackup.Entry()
         for line in text.split(separator: "\n") {
@@ -100,7 +171,7 @@ enum SystemProxy {
 
     static func readBackup() throws -> [ProxyBackup] {
         var result: [ProxyBackup] = []
-        for svc in try networkServices() {
+        for svc in try activeNetworkServices() {
             var b = ProxyBackup(service: svc)
             b.web = parseEntry((try? run(["-getwebproxy", svc])) ?? "")
             b.secureWeb = parseEntry((try? run(["-getsecurewebproxy", svc])) ?? "")
@@ -137,10 +208,10 @@ enum SystemProxy {
         }
 
         var warnings: [String] = []
-        let services = try networkServices()
+        let services = try activeNetworkServices()
         guard !services.isEmpty else {
             throw NSError(domain: "SystemProxy", code: -3, userInfo: [
-                NSLocalizedDescriptionKey: "读不到任何网络服务，无法设置系统代理"])
+                NSLocalizedDescriptionKey: "没有可设置系统代理的网络服务（可能当前流量在 VPN/虚拟接口上，为不冲突已跳过接管）"])
         }
 
         for svc in services {
@@ -233,7 +304,7 @@ enum SystemProxy {
 
     /// 供界面展示：当前系统 SOCKS 代理指向哪里
     static func currentSummary() -> String {
-        guard let svcs = try? networkServices(), let first = svcs.first else { return "未知" }
+        guard let svcs = try? activeNetworkServices(), let first = svcs.first else { return "未知" }
         let socks = parseEntry((try? run(["-getsocksfirewallproxy", first])) ?? "")
         let web = parseEntry((try? run(["-getwebproxy", first])) ?? "")
         var parts: [String] = []

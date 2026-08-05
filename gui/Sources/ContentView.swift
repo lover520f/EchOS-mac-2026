@@ -317,7 +317,7 @@ struct ContentView: View {
                 } else {
                     Picker("", selection: Binding(
                         get: { app.config.selectedID ?? app.config.servers.first?.id ?? UUID() },
-                        set: { app.select($0) }
+                        set: { id in Task { await app.select(id) } }
                     )) {
                         ForEach(Array(app.config.servers.enumerated()), id: \.element.id) { index, s in
                             // 空名按位置编号显示，避免同时出现多个一模一样的「未命名」
@@ -325,8 +325,7 @@ struct ContentView: View {
                         }
                     }
                     .labelsHidden()
-                    // 运行中不置灰、也切不了：切服务器得等停止后，防止连接和配置对不上
-                    .allowsHitTesting(!app.isRunning)
+                    // 运行中切换服务器会重启代理换到新服务器生效（见 AppState.select）
                 }
 
                 Button("新增") {
