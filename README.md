@@ -81,9 +81,14 @@
 
 服务端是一个 Cloudflare Worker，仓库根目录的 `Worker-ECH.js` 就是完整代码。仓库已带 `wrangler.toml` 和 `deploy-worker.sh`，两种方式任选：
 
-> <span style="color:red">**⚠️ 必读：Worker 的「兼容日期」必须设为 `Sep 15, 2025`（或更新）。**</span>
+> <span style="color:red">**⚠️ 必读：Worker「兼容日期」 改为 26年之前的任意一个日期，26年4月 群友反馈 部署使用不了。**</span>
 >
-> <span style="color:red">不设的话隧道**握手能通但数据不通**：客户端收到 CONNECTED 后连接挂起卡死（443 数据黑洞）。现象是「能连上但打不开任何网站」。设置位置：Worker 项目 → **Settings（设置）→ Running（运行时）→ Compatibility Date（兼容日期）** 改成 `Sep 15, 2025`。命令行部署（方式一）已由 `wrangler.toml` 的 `compatibility_date = "2025-09-15"` 自动带上；网页部署（方式二）需手动设置。</span>
+> 设置位置：
+> Worker 项目 → **Settings（设置）→ Running（运行时）→ Compatibility Date（兼容日期）** 改成 `Sep 15, 2025`。
+>
+> 命令行部署（方式一）已由 `wrangler.toml` 的 `compatibility_date = "2025-09-15"` 自动带上；
+>
+> 网页部署（方式二）需手动设置。</span>
 
 ### 方式一：命令行一键部署（推荐）
 
