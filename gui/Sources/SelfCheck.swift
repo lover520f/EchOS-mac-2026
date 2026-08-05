@@ -62,6 +62,50 @@ enum SelfCheck {
         return (false, last.1, last.2 + "（多次重试仍失败，可能出口被目标站点临时拦截）")
     }
 
+    /// 依次探测多个站点，任一成功即算通过，并记下是哪个站点通的。
+    /// 单一站点探针会误杀"出口被 Google 系屏蔽、但其他国际站点正常"的服务器
+    /// （例如某些 CF 分片对 google/gstatic 超时，bing/apple 却通畅）。
+    private static func probeAny(via socks: (host: String, port: Int),
+                                 urls: [String], timeout: TimeInterval) async -> (Bool, TimeInterval, String) {
+        var failures: [String] = []
+        var lastCost: TimeInterval = 0
+        for url in urls {
+            let (ok, cost, note) = await probe(via: socks, url: url, timeout: timeout)
+            if ok {
+                return (true, cost, "\(hostOf(url)) · \(Int(cost * 1000)) 毫秒")
+            }
+            failures.append("\(hostOf(url))：\(shortError(note))")
+            lastCost = cost
+        }
+        return (false, lastCost, failures.joined(separator: "；"))
+    }
+
+    /// 多站点探测 + 失败重试：第一遍全挂就隔 1s、3s 再各来一轮，
+    /// 给瞬时抖动的站点留出恢复窗口，别被一次抖动骗到。
+    private static func probeAnyRobust(via socks: (host: String, port: Int),
+                                       urls: [String], timeout: TimeInterval) async -> (Bool, TimeInterval, String) {
+        var last = await probeAny(via: socks, urls: urls, timeout: timeout)
+        if last.0 { return last }
+        for gap in [1.0, 3.0] {
+            try? await Task.sleep(nanoseconds: UInt64(gap * 1_000_000_000))
+            let again = await probeAny(via: socks, urls: urls, timeout: timeout)
+            if again.0 { return again }
+            last = again
+        }
+        return (false, last.1, last.2 + "（多次重试仍失败，可能出口被目标站点临时拦截）")
+    }
+
+    /// 从 URL 里取出 host，探针结果里直接点名是哪个站点。
+    private static func hostOf(_ url: String) -> String {
+        URL(string: url)?.host ?? url
+    }
+
+    /// 错误信息只留前面一段，多个站点的失败原因并排放在一行里不至于太长。
+    private static func shortError(_ s: String) -> String {
+        let text = s.replacingOccurrences(of: "\n", with: " ")
+        return text.count > 48 ? String(text.prefix(48)) + "…" : text
+    }
+
     /// 跑一轮完整自检
     static func run(socks: (host: String, port: Int), mode: RouteMode) async -> [Result] {
         var results: [Result] = []
@@ -82,17 +126,23 @@ enum SelfCheck {
             note: cnOK ? String(format: "%.0f 毫秒", cnCost * 1000)
                        : "失败：\(cnNote)"))
 
-        // 3) 国外站点：这一条最能反映隧道是否真的通。
-        // 黑名单模式下 google 也在名单里，同样该走隧道。
+        // 3) 国外站点：最能反映隧道是否真的通。用"零字节 204 连通性端点"
+        // （专为测网络设计，返回 204 空页、无业务内容/CDN 缓存干扰，比产品
+        // 首页可靠）：gstatic 优先，被屏蔽就退而测 Cloudflare，任一 204 即
+        // 隧道正常。多站点避免"Google 系出口被拦但其他正常"的服务器被误杀，
+        // 系统代理也不会被误还原。
         do {
-            let (foreignOK, fCost, fNote) = await probeRobust(via: socks,
-                                                              url: "https://www.gstatic.com/generate_204",
-                                                              timeout: 8)
+            let foreignProbes = [
+                "https://www.gstatic.com/generate_204",     // Google 连通性端点
+                "https://cp.cloudflare.com/generate_204",   // Cloudflare 连通性端点
+            ]
+            let (foreignOK, _, fNote) = await probeAnyRobust(via: socks,
+                                                             urls: foreignProbes,
+                                                             timeout: 8)
             results.append(Result(
                 title: "国外网站（经隧道）",
                 ok: foreignOK,
-                note: foreignOK ? String(format: "%.0f 毫秒 · 隧道正常", fCost * 1000)
-                                : "失败：\(fNote)",
+                note: foreignOK ? "\(fNote) · 隧道正常" : "失败：\(fNote)",
                 dependsOnTunnel: true))
         }
 

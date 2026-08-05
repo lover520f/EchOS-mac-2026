@@ -337,7 +337,6 @@ struct ContentView: View {
                     }
                 }
                 .disabled(app.isRunning)
-                .help("还有服务器没保存时不能新增下一个，先保存或删除")
                 Button("重命名") {
                     renameText = app.selected?.name ?? ""
                     nameErrorText = ""
@@ -350,9 +349,6 @@ struct ContentView: View {
                 } label: {
                     Text("保存")
                 }
-                .help(app.isServerDirty
-                      ? "有未保存的改动，点一下保存到本地"
-                      : "参数已保存，改动后此按钮会高亮提醒")
                 persistentTint(.red, isActive: !app.isRunning) {
                     confirmDelete = true
                 } label: {
@@ -384,7 +380,6 @@ struct ContentView: View {
                 }
                 .buttonStyle(.plain)
                 // 导出/导入只读写服务器数据，不影响运行中的代理，运行中也可用
-                .help("导出选中的服务器给其他设备，或导入别人分享的服务器")
 
                 // 备份：整份配置本地 / WebDAV
                 Button {
@@ -421,7 +416,6 @@ struct ContentView: View {
                 .buttonStyle(.plain)
                 // 备份/还原不影响运行中的代理（还原会先停代理并提示），运行中也可用
                 .disabled(app.webdavBusy)
-                .help("把整份配置（服务器 + 分流规则 + 偏好）备份到本地或 WebDAV")
 
                 Button {
                     app.runSelfCheck()
@@ -433,7 +427,6 @@ struct ContentView: View {
                 // 任何状态都能点：代理运行时跑完整连通性检测，未启动时预检
                 // 服务端/DoH 可达性（人工确认配置能不能用），只有检测进行中置灰
                 .disabled(app.checking)
-                .help("代理运行时跑完整连通性检测（本地端口 + 国内/国外网站）；\n未启动时预检服务端和 DoH 可达性，确认配置能用再启动。")
             }
         }
     }
@@ -633,7 +626,6 @@ struct ContentView: View {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .font(.system(size: 11))
                     .foregroundColor(.orange)
-                    .help("上面已经有一条同样目标的规则，这条不会生效。\n内核按顺序匹配，先命中的那条说了算。")
             }
 
             Button {
@@ -641,7 +633,6 @@ struct ContentView: View {
             } label: {
                 Image(systemName: "trash").font(.system(size: 11))
             }
-            .help("删除这条规则")
         }
         // 固定行高：规则列表的容器高度按它精确计算，第 4 条完全藏在滚动区里
         .frame(height: 30)
@@ -682,13 +673,11 @@ struct ContentView: View {
                     get: { app.launchAtLogin },
                     set: { app.setLaunchAtLogin($0) }
                 ))
-                .help("登录 Mac 后自动打开本软件")
 
                 Toggle("自动设置系统代理", isOn: Binding(
                     get: { app.config.autoSystemProxy },
                     set: { v in app.setAutoSystemProxy(v) }
                 ))
-                .help("让 Safari / Chrome 等程序走本工具，停止时自动还原你原来的设置。\n运行中切换会立即生效。")
 
                 Spacer()
 
@@ -715,7 +704,6 @@ struct ContentView: View {
                 Circle()
                     .fill(statusDotColor)
                     .frame(width: 10, height: 10)
-                    .help(checkTooltip)
                 Text(app.statusText)
                     .font(.system(size: 12))
                     .foregroundColor(app.isRunning ? .primary : (app.isStarting ? .secondary : .secondary))
@@ -724,7 +712,6 @@ struct ContentView: View {
                     Text(checkLabel)
                         .font(.system(size: 11))
                         .foregroundColor(.secondary)
-                        .help(checkTooltip)
                 }
                 Spacer()
             }
@@ -768,15 +755,6 @@ struct ContentView: View {
         }
     }
 
-    private var checkTooltip: String {
-        switch app.checkState {
-        case .idle:    return "启动后会自动检测一次"
-        case .running: return "正在检测端口、国内直连和隧道…"
-        case .ok(let d):     return "自检通过\n\n" + d
-        case .failed(let d): return "自检未通过\n\n" + d
-        }
-    }
-
     // MARK: - 运行日志
 
     private func logSection() -> some View {
@@ -794,7 +772,6 @@ struct ContentView: View {
                     }
                 }
                 .buttonStyle(.plain)
-                .help(app.config.logVisible ? "点击收起日志" : "点击展开日志")
 
                 Spacer()
 
@@ -807,7 +784,6 @@ struct ContentView: View {
                     }
                     .labelsHidden()
                     .frame(width: 96)
-                    .help("界面日志的详细程度。无论选哪个，日志文件里始终是全量记录。")
 
                     Button {
                         // 打开当前视图对应的那个文件，而不是永远打开运行日志
@@ -816,14 +792,12 @@ struct ContentView: View {
                     } label: {
                         Label("日志文件", systemImage: "folder")
                     }
-                    .help("打开 ~/Library/Application Support/EchOS/logs/\n运行日志 latest.log，自检记录 selfcheck.log")
 
                     Button {
                         app.clearLog()
                     } label: {
                         Label("清空", systemImage: "trash")
                     }
-                    .help("只清空这里显示的内容，日志文件不受影响")
                 }
             }
             .controlSize(.small)
@@ -965,7 +939,6 @@ struct ContentView: View {
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
             .frame(width: 22)
-            .help("从常用列表里挑一个填进去，填完照样能改")
         }
     }
 

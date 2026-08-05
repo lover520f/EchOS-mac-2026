@@ -50,8 +50,21 @@ chmod +x "$APP/Contents/MacOS/EchOS"
 
 echo "==> 3/3 组装 App"
 cp "$ROOT/gui/Info.plist" "$APP/Contents/Info.plist"
-# 更新源仓库（owner/repo）：不写死在源码里，发布时用环境变量注入；
-# 不注入则该键不存在，界面上的「检查更新」会提示未配置，不暴露地址
+# 更新源仓库（owner/repo）：不写死在源码里。默认从当前 git remote 自动获取，
+# 因此 fork 后打包会自动指向 fork 自己的仓库，无需改任何代码；
+# 也可用环境变量 ECH_UPDATE_REPO 手动覆盖（CI 里由 ${{ github.repository }} 传入）。
+# 拿不到仓库地址时不注入该键，界面上的「检查更新」会提示未配置，不暴露地址。
+if [ -z "${ECH_UPDATE_REPO:-}" ]; then
+  _remote=$(git -C "$ROOT" config --get remote.origin.url 2>/dev/null)
+  case "$_remote" in
+    git@github.com:*|ssh://git@github.com/*)
+      ECH_UPDATE_REPO=$(echo "$_remote" | sed -E 's#.*github\.com[/:]##; s#\.git$##')
+      ;;
+    https://github.com/*)
+      ECH_UPDATE_REPO=$(echo "$_remote" | sed -E 's#https://github\.com/##; s#\.git$##')
+      ;;
+  esac
+fi
 if [ -n "${ECH_UPDATE_REPO:-}" ]; then
   PLIST="$APP/Contents/Info.plist"
   /usr/libexec/PlistBuddy -c "Delete :EchOSUpdateRepo" "$PLIST" 2>/dev/null || true

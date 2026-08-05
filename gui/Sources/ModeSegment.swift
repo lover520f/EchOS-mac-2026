@@ -47,6 +47,5 @@ struct ModeSegment: View {
                 guard !disabled else { return }
                 selection = mode
             }
-            .help(mode.detail)
     }
 }
