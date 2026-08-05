@@ -83,7 +83,7 @@
 
 > <span style="color:red">**⚠️ 必读：Worker 的「兼容日期」必须设为 `Sep 15, 2025`（或更新）。**</span>
 >
-> <span style="color:red">不设的话隧道**握手能通但数据不通**：客户端收到 CONNECTED 后连接挂起卡死（443 数据黑洞）。现象是「能连上但打不开任何网站」。设置位置：Worker 项目 → **Settings → Compatibility → Compatibility Date** 改成 `Sep 15, 2025`。命令行部署（方式一）已由 `wrangler.toml` 的 `compatibility_date = "2025-09-15"` 自动带上；网页部署（方式二）需手动设置。</span>
+> <span style="color:red">不设的话隧道**握手能通但数据不通**：客户端收到 CONNECTED 后连接挂起卡死（443 数据黑洞）。现象是「能连上但打不开任何网站」。设置位置：Worker 项目 → **Settings（设置）→ Running（运行时）→ Compatibility Date（兼容日期）** 改成 `Sep 15, 2025`。命令行部署（方式一）已由 `wrangler.toml` 的 `compatibility_date = "2025-09-15"` 自动带上；网页部署（方式二）需手动设置。</span>
 
 ### 方式一：命令行一键部署（推荐）
 
@@ -104,7 +104,7 @@ TOKEN=你的密钥 ./deploy-worker.sh
 
 1. 打开 [Cloudflare Dashboard](https://dash.cloudflare.com) → **Workers & Pages** → **Create** → 选 **Workers**
 2. 名称随意，创建后点 **Edit code**，用 `Worker-ECH.js` 的内容覆盖默认代码，保存
-3. <span style="color:red">**设置兼容日期**：**Settings → Compatibility → Compatibility Date** 改成 `Sep 15, 2025`（⚠️ 不设则隧道数据不通，现象是「能连上但打不开网站」）</span>
+3. <span style="color:red">**设置兼容日期**：**Settings（设置）→ Running（运行时）→ Compatibility Date（兼容日期）** 改成 `Sep 15, 2025`（⚠️ 不设则隧道数据不通，现象是「能连上但打不开网站」）</span>
 4. 可选：**Settings → Variables and Secrets → Add**，加一个环境变量 `TOKEN`
    - 设了 TOKEN 后，客户端必须填相同的 TOKEN 才能连上
    - 不设 TOKEN 就是全公开，任何人都能拿你的 Worker 当代理，**强烈建议设置**

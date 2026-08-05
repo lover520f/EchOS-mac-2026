@@ -56,7 +56,7 @@
   能通但数据不通，表现为「能连上但打不开任何网站」（CONNECTED 后连接挂起卡死，
   443 数据黑洞）。`wrangler.toml` 已带 `compatibility_date = "2025-09-15"`，
   命令行部署自动生效；网页 Dashboard 部署需手动设置
-  （Settings → Compatibility → Compatibility Date）
+  （Settings → Running → Compatibility Date）
 
 **自检误杀修复（多站点探针）**
 
