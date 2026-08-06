@@ -1578,16 +1578,15 @@ final class AppState: NSObject, ObservableObject {
         NEW="$1"
         MP="$2"
         DMG="$3"
-        for i in $(seq 1 150); do
+        for i in $(seq 1 200); do
           if ! pgrep -x "EchOS" > /dev/null 2>&1; then break; fi
           sleep 0.1
         done
-        # 旧进程 15 秒还没退干净：强制结束，避免新旧两个实例同时在菜单栏
-        # 出现两个图标（正常退出 0.1 秒内就消失，等满 15 秒属于异常）
-        if pgrep -x "EchOS" > /dev/null 2>&1; then
-          pkill -x "EchOS" 2>/dev/null
-          sleep 1
-        fi
+        # 无论旧实例是正常退出还是超时，这里都无条件强制结束它，并留一点时间给
+        # 系统移除它的菜单栏图标，再启动新实例——避免"新旧两个图标短暂并存"。
+        # 停在 pkill 时新实例尚未启动，不会误杀自己。
+        pkill -x "EchOS" 2>/dev/null || true
+        sleep 2
         rm -rf "$APP"
         cp -R "$NEW" "$APP" 2>/dev/null
         chmod +x "$APP/Contents/MacOS/EchOS" 2>/dev/null
