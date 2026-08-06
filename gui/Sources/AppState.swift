@@ -30,7 +30,9 @@ final class AppState: NSObject, ObservableObject {
     /// 系统代理是否已**成功接管**（enable 执行完且验证通过）。
     /// 与 proxyTakenOver（从标记接管那一刻起就为 true）不同，这个只在
     /// 真正设置成功后才变 true —— 菜单栏图标据此才变蓝，避免"说好了其实没成"。
-    @Published var proxyReady = SystemProxy.isActive
+    /// 初始不信任残留的 SystemProxy.isActive：崩溃/强杀后系统代理可能残留接管，
+    /// 但那只是旧标记、本地端口早已没人监听，图标不该假蓝（真的接管成功才会蓝）。
+    @Published var proxyReady = false
     /// WebDAV 上传/下载进行中（用来置灰按钮、防连点）
     @Published var webdavBusy = false
 
@@ -1295,12 +1297,19 @@ final class AppState: NSObject, ObservableObject {
 
     /// 启动时调用：上次退出时代理正在运行则自动恢复（含自动更新重启）。
     /// 一次性标志：恢复尝试后即清除，避免每次冷启动都自动连。
+    /// 若上次异常退出（崩溃/强杀）导致系统代理残留接管，则自愈还原：
+    /// 旧标记下本地端口早已没人监听，留着会让浏览器流量打到黑洞、图标假蓝。
     func restoreProxyIfNeeded() {
-        guard UserDefaults.standard.bool(forKey: Self.proxyWasRunningKey) else { return }
+        let shouldRestore = UserDefaults.standard.bool(forKey: Self.proxyWasRunningKey)
         UserDefaults.standard.set(false, forKey: Self.proxyWasRunningKey)
-        guard !isRunning && !isStarting else { return }
-        log("[系统] 上次退出时代理正在运行，自动恢复代理…")
-        start()
+        if shouldRestore && !isRunning && !isStarting {
+            log("[系统] 上次退出时代理正在运行，自动恢复代理…")
+            start()
+        } else if SystemProxy.isActive && !isRunning && !isStarting {
+            log("[系统] 检测到残留的系统代理接管，正在还原…")
+            proxyTakenOver = false
+            Task.detached { SystemProxy.restore() }
+        }
     }
 
     /// 启动时调用：后台检查 App 新版本 + 分流数据，都不阻塞启动。
