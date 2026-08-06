@@ -14,6 +14,7 @@ struct ECHApp: App {
                     delegate.state = app
                     app.applyDockIconPolicy()
                     app.flushPendingLogs()
+                    app.restoreProxyIfNeeded()
                     app.checkForUpdatesAtStartup()
                 }
         }

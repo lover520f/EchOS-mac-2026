@@ -1271,7 +1271,12 @@ final class AppState: NSObject, ObservableObject {
     }
 
     /// App 退出前的收尾：停内核 + 还原系统代理，避免把用户网络留在坏状态。
+    /// 退出时记录代理是否在运行，供下次启动自动恢复（更新重启也恢复）。
+    static let proxyWasRunningKey = "EchOS.proxyWasRunning"
+
     func shutdown() {
+        // 退出前快照代理运行状态：下次启动（含自动更新重启）据此自动恢复
+        UserDefaults.standard.set(isRunning, forKey: Self.proxyWasRunningKey)
         if proxyTakenOver { SystemProxy.restore() }
         process?.terminationHandler = nil
         process?.terminate()
@@ -1287,6 +1292,16 @@ final class AppState: NSObject, ObservableObject {
     }
 
     // MARK: - 更新
+
+    /// 启动时调用：上次退出时代理正在运行则自动恢复（含自动更新重启）。
+    /// 一次性标志：恢复尝试后即清除，避免每次冷启动都自动连。
+    func restoreProxyIfNeeded() {
+        guard UserDefaults.standard.bool(forKey: Self.proxyWasRunningKey) else { return }
+        UserDefaults.standard.set(false, forKey: Self.proxyWasRunningKey)
+        guard !isRunning && !isStarting else { return }
+        log("[系统] 上次退出时代理正在运行，自动恢复代理…")
+        start()
+    }
 
     /// 启动时调用：后台检查 App 新版本 + 分流数据，都不阻塞启动。
     /// 延后几秒再查，先把窗口和菜单栏准备好，网络慢也不影响首屏。
@@ -1538,7 +1553,7 @@ final class AppState: NSObject, ObservableObject {
             NSWorkspace.shared.open(dmgURL)
             return
         }
-        guard let scriptURL = writeUpdateScript(newAppPath: newApp.path, mountPoint: mountPoint) else {
+        guard let scriptURL = writeUpdateScript(newAppPath: newApp.path, mountPoint: mountPoint, dmgPath: dmgURL.path) else {
             updateStatus = "自动更新失败，已退回手动方式"
             log("[更新] 更新脚本创建失败，请手动拖入")
             hdiutilDetach(mountPoint)
@@ -1548,35 +1563,48 @@ final class AppState: NSObject, ObservableObject {
         updateStatus = "正在重启 App 完成更新…"
         log("[更新] 正在替换 /Applications/EchOS.app 并重启…")
         // 脚本先在后台跑起来；它等主进程退出后再替换，所以这里退出主进程
-        launchDetached(scriptURL, newAppPath: newApp.path, mountPoint: mountPoint)
+        launchDetached(scriptURL, newAppPath: newApp.path, mountPoint: mountPoint, dmgPath: dmgURL.path)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
             self.shutdown()
             NSApp.terminate(nil)
         }
     }
 
-    /// 把更新脚本写到 /tmp，返回路径。脚本：等 EchOS 退出 → 替换 → 重启。
-    private func writeUpdateScript(newAppPath: String, mountPoint: String) -> URL? {
+    /// 把更新脚本写到 /tmp，返回路径。脚本：等 EchOS 退出 → 替换 → 删 DMG → 重启。
+    private func writeUpdateScript(newAppPath: String, mountPoint: String, dmgPath: String) -> URL? {
         let script = """
         #!/bin/bash
         APP="/Applications/EchOS.app"
         NEW="$1"
         MP="$2"
+        DMG="$3"
         for i in $(seq 1 150); do
           if ! pgrep -x "EchOS" > /dev/null 2>&1; then break; fi
           sleep 0.1
         done
+        # 旧进程 15 秒还没退干净：强制结束，避免新旧两个实例同时在菜单栏
+        # 出现两个图标（正常退出 0.1 秒内就消失，等满 15 秒属于异常）
+        if pgrep -x "EchOS" > /dev/null 2>&1; then
+          pkill -x "EchOS" 2>/dev/null
+          sleep 1
+        fi
         rm -rf "$APP"
         cp -R "$NEW" "$APP" 2>/dev/null
         chmod +x "$APP/Contents/MacOS/EchOS" 2>/dev/null
         xattr -dr com.apple.quarantine "$APP" 2>/dev/null
         if [ -n "$MP" ]; then hdiutil detach "$MP" > /dev/null 2>&1; fi
+        # 更新替换成功才删除已下载的 DMG；失败退回手动方式时保留它
+        if [ -n "$DMG" ] && [ -f "$DMG" ]; then rm -f "$DMG"; fi
         # 写更新标记：新实例启动时据此只弹"更新完成"、不打开主窗口
         VER=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Contents/Info.plist" 2>/dev/null)
         MARKER="$HOME/Library/Application Support/EchOS/.updated-version"
         mkdir -p "$HOME/Library/Application Support/EchOS"
         echo "$VER" > "$MARKER"
-        open "$APP"
+        # 重启用直接后台执行二进制，不用 open：open 在脚本上下文不可靠（曾返回
+        # 成功却没拉起进程、或新旧 bundle 注册残留导致不启动），直接执行已验证
+        # 能正常出现菜单栏图标。后台 + disown 让新进程脱离脚本会话独立存活。
+        "$APP/Contents/MacOS/EchOS" > /dev/null 2>&1 &
+        disown
         """
         let url = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("echos-update-\(Int(Date().timeIntervalSince1970)).sh")
         do {
@@ -1589,10 +1617,10 @@ final class AppState: NSObject, ObservableObject {
     }
 
     /// 后台启动脚本（不等待）。父进程退出后脚本继续执行。
-    private func launchDetached(_ script: URL, newAppPath: String, mountPoint: String) {
+    private func launchDetached(_ script: URL, newAppPath: String, mountPoint: String, dmgPath: String) {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/bash")
-        p.arguments = [script.path, newAppPath, mountPoint]
+        p.arguments = [script.path, newAppPath, mountPoint, dmgPath]
         try? p.run()
     }
 
