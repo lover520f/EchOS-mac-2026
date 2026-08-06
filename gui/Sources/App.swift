@@ -100,7 +100,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         alert.messageText = "更新完成"
         alert.informativeText = "已升级到 v\(version)"
         alert.addButton(withTitle: "好")
-        AppState.runModalCentered(alert)
+        _ = AppState.runModalTopCentered(alert)
     }
 
     /// ContentView 算出的内容所需高度。窗口手动缩放时不能比它矮，

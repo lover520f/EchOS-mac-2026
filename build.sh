@@ -26,6 +26,9 @@ if [ "$UNIVERSAL" = "1" ]; then
   lipo -create -output "$APP/Contents/Resources/x-tunnel" "$OUT/x-tunnel-amd64" "$OUT/x-tunnel-arm64"
   rm -f "$OUT/x-tunnel-amd64" "$OUT/x-tunnel-arm64"
 else
+  # go build 拒绝覆盖已存在的输出文件（上次构建留下的 fat binary 不被识别为
+  # object 文件，会报 "already exists and is not an object file" 中断整次构建）。
+  rm -f "$APP/Contents/Resources/x-tunnel"
   CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o "$APP/Contents/Resources/x-tunnel" .
 fi
 chmod +x "$APP/Contents/Resources/x-tunnel"

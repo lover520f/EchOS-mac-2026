@@ -989,8 +989,10 @@ final class AppState: NSObject, ObservableObject {
             let data = try enc.encode(ServerShareFile(servers: servers))
             try data.write(to: url, options: .atomic)
             log("[系统] 已导出 \(servers.count) 个服务器到 \(url.lastPathComponent)")
+            showInfoDialog(title: "导出成功", text: "已导出 \(servers.count) 台服务器")
         } catch {
             log("[系统] 导出失败：\(error.localizedDescription)")
+            showInfoDialog(title: "导出失败", text: "未能写入分享文件")
         }
     }
 
@@ -1064,8 +1066,10 @@ final class AppState: NSObject, ObservableObject {
             if renamed > 0 { tail += "，改名 \(renamed) 台" }
             if skipped > 0 { tail += "，跳过 \(skipped) 台无效/重复" }
             log("[系统] 已导入 \(added) 个服务器\(tail)")
+            showInfoDialog(title: "导入成功", text: "已导入 \(added) 台服务器")
         } catch {
             log("[系统] 导入失败：请选择服务器分享文件（.json）")
+            showInfoDialog(title: "导入失败", text: "不是有效的服务器分享文件")
         }
     }
 
@@ -1099,8 +1103,10 @@ final class AppState: NSObject, ObservableObject {
             let data = try enc.encode(out)
             try data.write(to: url, options: .atomic)
             log("[系统] 配置已备份到 \(url.lastPathComponent)（\(out.servers.count) 个服务器）")
+            showInfoDialog(title: "本地备份成功", text: "已备份到本机（\(out.servers.count) 台服务器）")
         } catch {
             log("[系统] 备份失败：\(error.localizedDescription)")
+            showInfoDialog(title: "本地备份失败", text: "未能写入备份文件")
         }
     }
 
@@ -1109,8 +1115,11 @@ final class AppState: NSObject, ObservableObject {
             let data = try Data(contentsOf: url)
             let cfg = try JSONDecoder().decode(AppConfig.self, from: data)
             await applyRestored(cfg)
+            log("[系统] 配置已还原")
+            showInfoDialog(title: "本地还原成功", text: "配置已还原")
         } catch {
             log("[系统] 还原失败：文件不是有效的配置备份")
+            showInfoDialog(title: "本地还原失败", text: "不是有效的配置备份")
         }
     }
 
@@ -1167,15 +1176,15 @@ final class AppState: NSObject, ObservableObject {
 
     func backupToWebDAV() async {
         guard let w = config.webdav, !w.url.isEmpty else {
-            log("[系统] 请先在「WebDAV 设置」里填好地址")
+            showInfoDialog(title: "WebDAV 备份", text: "请先填写 WebDAV 地址")
             return
         }
         guard let url = WebDAVClient.endpoint(w.url, directory: w.directory) else {
-            log("[系统] WebDAV 地址无效")
+            showInfoDialog(title: "WebDAV 备份", text: "WebDAV 地址无效")
             return
         }
         guard let password = webdavPassword else {
-            log("[系统] 请先设置 WebDAV 密码")
+            showInfoDialog(title: "WebDAV 备份", text: "请先设置 WebDAV 密码")
             return
         }
         webdavBusy = true
@@ -1186,22 +1195,64 @@ final class AppState: NSObject, ObservableObject {
             let data = try enc.encode(cleanConfig)
             try await WebDAVClient.upload(data, to: url, username: w.username, password: password)
             log("[系统] 已备份到 WebDAV")
+            showInfoDialog(title: "WebDAV 备份", text: "已备份到 WebDAV")
         } catch {
-            log("[系统] WebDAV 备份失败：\(error.localizedDescription)")
+            let msg = describeWebDAVError(error)
+            log("[系统] WebDAV 备份失败：\(msg)")
+            showInfoDialog(title: "WebDAV 备份失败", text: "服务器连接失败")
         }
+    }
+
+    /// WebDAV 错误按原因分类（3+1：认证失败 / 网络不通 / 服务器问题 + 其他兜底），
+    /// 供日志与失败弹窗共用。
+    private func describeWebDAVError(_ error: Error) -> String {
+        if let we = error as? WebDAVError {
+            switch we {
+            case .badURL:
+                return "其他错误：WebDAV 地址无效"
+            case .badStatus(let code):
+                switch code {
+                case 401, 403:
+                    return "认证失败：用户名 / 密码不正确，或服务器要求登录"
+                case 404:
+                    return "服务器问题：文件或目录不存在（检查地址与目录）"
+                case 405:
+                    return "服务器问题：不支持写入，可能不是 WebDAV 服务"
+                case 507:
+                    return "服务器问题：存储空间不足"
+                default:
+                    return "服务器问题：返回 HTTP \(code)"
+                }
+            }
+        }
+        if let e = error as? URLError {
+            switch e.code {
+            case .timedOut, .cannotFindHost, .dnsLookupFailed,
+                 .cannotConnectToHost, .notConnectedToInternet,
+                 .networkConnectionLost:
+                return "网络不通：无法连接到服务器（检查网络或地址）"
+            case .secureConnectionFailed, .serverCertificateUntrusted,
+                 .serverCertificateHasBadDate, .serverCertificateHasUnknownRoot,
+                 .clientCertificateRejected:
+                return "网络不通：SSL / TLS 证书验证失败"
+            default:
+                return "网络不通：\(error.localizedDescription)"
+            }
+        }
+        return "其他错误：\(error.localizedDescription)"
     }
 
     func restoreFromWebDAV() async {
         guard let w = config.webdav, !w.url.isEmpty else {
-            log("[系统] 请先在「WebDAV 设置」里填好地址")
+            showInfoDialog(title: "WebDAV 还原", text: "请先填写 WebDAV 地址")
             return
         }
         guard let url = WebDAVClient.endpoint(w.url, directory: w.directory) else {
-            log("[系统] WebDAV 地址无效")
+            showInfoDialog(title: "WebDAV 还原", text: "WebDAV 地址无效")
             return
         }
         guard let password = webdavPassword else {
-            log("[系统] 请先设置 WebDAV 密码")
+            showInfoDialog(title: "WebDAV 还原", text: "请先设置 WebDAV 密码")
             return
         }
         webdavBusy = true
@@ -1210,8 +1261,12 @@ final class AppState: NSObject, ObservableObject {
             let data = try await WebDAVClient.download(from: url, username: w.username, password: password)
             let cfg = try JSONDecoder().decode(AppConfig.self, from: data)
             await applyRestored(cfg)
+            log("[系统] 已从 WebDAV 还原配置")
+            showInfoDialog(title: "WebDAV 还原", text: "已从 WebDAV 还原")
         } catch {
-            log("[系统] WebDAV 还原失败：\(error.localizedDescription)")
+            let msg = describeWebDAVError(error)
+            log("[系统] WebDAV 还原失败：\(msg)")
+            showInfoDialog(title: "WebDAV 还原失败", text: "服务器连接失败")
         }
     }
 
@@ -1284,34 +1339,69 @@ final class AppState: NSObject, ObservableObject {
         }
     }
 
-    /// 让 NSAlert 弹窗窗口尽量居中并置前。注意：runModal() 会自己重排窗口位置，
-    /// 模态会话期间也无法再移动窗口（原生限制）——内容本身是居中的。
-    /// 先激活 App，弹窗才不会躲在别的窗口后面变成"看不见的残留窗口"
-    ///（主窗口是隐藏而非关闭，激活不会把它重新拉出来）。
-    static func runModalCentered(_ alert: NSAlert) -> NSApplication.ModalResponse {
+    /// 把弹窗放到所在屏幕上部居中：水平居中、垂直靠上（顶部留 120pt），
+    /// 符合 macOS 对话框"靠上"的原生观感。runModal() 的模态循环会自行重排
+    /// 窗口位置/尺寸（长文本尤其明显），所以用 Timer 在模态会话期间持续
+    /// 把窗口拉回目标位置。Timer 同时挂 .default / .common / .modalPanel
+    /// 三种 runloop mode——runModal 实际用哪个 mode 都能触发。
+    /// 先激活 App，弹窗才不会躲在别的窗口后面变成"看不见的残留窗口"。
+    static func runModalTopCentered(_ alert: NSAlert) -> NSApplication.ModalResponse {
         NSApp.activate(ignoringOtherApps: true)
-        alert.window.center()
+        alert.layout()
+        let win = alert.window
+        positionTopCenter(win)
+        win.makeKeyAndOrderFront(nil)
+        let timer = Timer(timeInterval: 0.03, repeats: true) { _ in
+            MainActor.assumeIsolated { positionTopCenter(win) }
+        }
+        let rl = RunLoop.main
+        rl.add(timer, forMode: .default)
+        rl.add(timer, forMode: .common)
+        rl.add(timer, forMode: .modalPanel)
         let resp = alert.runModal()
+        timer.invalidate()
         // 模态结束立即隐藏窗口：accessory（无 Dock 图标）模式下模态窗口
         // 有时不会自动消失，会残留成菜单栏下方的透明幽灵窗——一次弹窗留
         // 一个、越积越多（每个都占着屏幕上的一个空位，点不掉）。
-        alert.window.orderOut(nil)
+        win.orderOut(nil)
         return resp
     }
 
+    /// 手动把窗口放到所在屏幕上部居中。不用 win.center()：它在 modal 窗口上
+    /// 基准不可靠（实测可见区中心在 (960,558)，center() 却停在 (960,740)），
+    /// 自己算坐标最可控。
+    @MainActor
+    private static func positionTopCenter(_ win: NSWindow) {
+        guard let screen = win.screen ?? NSScreen.main else { return }
+        let vf = screen.visibleFrame
+        let f = win.frame
+        win.setFrameOrigin(NSPoint(x: vf.midX - f.width / 2, y: vf.maxY - f.height - 120))
+    }
+
     /// 单一按钮的信息弹窗（检查更新的"已是最新/失败/未配置"结果）。
-    /// 原生 NSAlert，内容居中，窗口屏幕居中。
     private func showSimpleDialog(_ text: String) {
         let alert = NSAlert()
         alert.icon = NSApp.applicationIconImage
         alert.messageText = "检查更新"
         alert.informativeText = text
         alert.addButton(withTitle: "好")
-        Self.runModalCentered(alert)
+        _ = Self.runModalTopCentered(alert)
     }
 
-    /// 发现新版本时的独立弹窗（原生 NSAlert，内容居中，窗口屏幕居中，不打开主窗口）。
-    /// messageText（加粗标题）= 当前版本；informativeText（正常正文）= 发现新版本。
+    /// 通用信息提示弹窗（自定义标题）。如备份/还原结果。
+    private func showInfoDialog(title: String, text: String) {
+        DispatchQueue.main.async {
+            let alert = NSAlert()
+            alert.icon = NSApp.applicationIconImage
+            alert.messageText = title
+            alert.informativeText = text
+            alert.addButton(withTitle: "好")
+            _ = Self.runModalTopCentered(alert)
+        }
+    }
+
+    /// 发现新版本时的独立弹窗（不打开主窗口）。
+    /// 标题（加粗）= 当前版本；正文 = 发现新版本。
     private func promptUpdateDialog(_ info: Updater.ReleaseInfo) {
         let alert = NSAlert()
         alert.icon = NSApp.applicationIconImage
@@ -1319,7 +1409,7 @@ final class AppState: NSObject, ObservableObject {
         alert.informativeText = "发现新版本 \(info.tag)"
         alert.addButton(withTitle: "下载并更新")
         alert.addButton(withTitle: "以后再说")
-        if Self.runModalCentered(alert) == .alertFirstButtonReturn {
+        if Self.runModalTopCentered(alert) == .alertFirstButtonReturn {
             downloadUpdate()
         }
     }
