@@ -283,9 +283,8 @@ struct ServerConfig: Codable, Identifiable, Equatable {
     /// 本地监听端口。SOCKS5 用它，HTTP 代理自动用它 +1。
     var listenPort: Int = 30000
     /// -ip 优选 IP / 优选域名，多个用逗号分隔。
-    /// 默认留空 —— 打包分发的版本不该预置任何人的服务器信息，
-    /// 示例值放在输入框的占位符里提示就够了。
-    var ip: String = ""
+    /// 默认 cdns.doon.eu.org —— 客户端预设的默认优选域名，新服务器直接可用。
+    var ip: String = "cdns.doon.eu.org"
     /// -ech ECH 域名，固定 cloudflare-ech.com
     var ech: String = "cloudflare-ech.com"
     /// -dns 查询 ECH 公钥用的 DoH 服务器
@@ -339,7 +338,7 @@ struct ServerConfig: Codable, Identifiable, Equatable {
             listen = h.isEmpty ? "127.0.0.1" : h
             listenPort = prt
         }
-        ip = s(.ip, "")
+        ip = s(.ip, "cdns.doon.eu.org")
         ech = s(.ech, "cloudflare-ech.com")
         dns = s(.dns, "dns.alidns.com/dns-query")
         token = s(.token, "")

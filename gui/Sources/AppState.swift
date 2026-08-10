@@ -364,7 +364,8 @@ final class AppState: NSObject, ObservableObject {
     func setLaunchAtLogin(_ on: Bool) {
         do {
             try LoginItem.set(on)
-            log("[系统] 开机自启动已\(on ? "开启" : "关闭")")
+            let state = LoginItem.isEnabled ? "已开启" : "已关闭"
+            log("[系统] 开机自启动已设为\(on ? "开启" : "关闭")（实际状态：\(state)）")
         } catch {
             log("[系统] 设置开机自启动失败：\(error.localizedDescription)")
         }
@@ -556,53 +557,55 @@ final class AppState: NSObject, ObservableObject {
         pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
             guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
-            Task { @MainActor in self?.log(text) }
+            let me = self
+            Task { @MainActor in me?.log(text) }
         }
 
         p.terminationHandler = { [weak self] proc in
+            let me = self
             Task { @MainActor in
-                guard let self else { return }
-                self.stdoutPipe?.fileHandleForReading.readabilityHandler = nil
-                self.stdoutPipe = nil
-                self.process = nil
-                self.isRunning = false
-                self.isStarting = false
-                self.checkState = .idle
+                guard let me else { return }
+                me.stdoutPipe?.fileHandleForReading.readabilityHandler = nil
+                me.stdoutPipe = nil
+                me.process = nil
+                me.isRunning = false
+                me.isStarting = false
+                me.checkState = .idle
                 KernelPID.clear()
-                self.log("[系统] 内核已退出（状态码 \(proc.terminationStatus)）")
-                if self.proxyTakenOver { self.disableSystemProxy() }
-                self.refreshStatusText()
+                me.log("[系统] 内核已退出（状态码 \(proc.terminationStatus)）")
+                if me.proxyTakenOver { me.disableSystemProxy() }
+                me.refreshStatusText()
 
                 // 非零退出码 = 启动失败或运行中崩溃。stop() 会先把 terminationHandler
                 // 置 nil，所以走到这里一定是异常退出。绝大多数是端口被占用，
                 // 从内核日志里找"address already in use / bind"这类关键字，
                 // 给出明确的修复提示，而不是只显示一个生硬的"状态码"。
                 if proc.terminationStatus != 0 {
-                    let hints = Array(self.logLines.suffix(20)).joined(separator: "\n")
+                    let hints = Array(me.logLines.suffix(20)).joined(separator: "\n")
                     let lower = hints.lowercased()
                     if lower.contains("address already in use")
                         || lower.contains("cannot bind")
                         || lower.contains("bind:") {
                         // 内核 bind 失败：查得到占用者就走弹窗确认（和预检查一致），
                         // 查不到（如刚释放的 TIME_WAIT）就纯提示。
-                        let conflict = [self.activeSocks, self.activeHTTP]
+                        let conflict = [me.activeSocks, me.activeHTTP]
                             .compactMap { $0 }
                             .lazy
                             .compactMap { ep -> (String, Int, PortPicker.Occupant)? in
                                 guard let o = PortPicker.occupant(of: ep.port) else { return nil }
-                                let label = (ep.port == self.activeSocks?.port) ? "SOCKS5" : "HTTP"
+                                let label = (ep.port == me.activeSocks?.port) ? "SOCKS5" : "HTTP"
                                 return (label, ep.port, o)
                             }.first
                         if let (label, port, o) = conflict {
-                            self.log("[系统] \(label) 端口 \(port) 被 \(o.label) 占用，等待用户确认…")
-                            self.pendingPortConflict = PortConflict(label: label, port: port, name: o.name, pid: o.pid)
+                            me.log("[系统] \(label) 端口 \(port) 被 \(o.label) 占用，等待用户确认…")
+                            me.pendingPortConflict = PortConflict(label: label, port: port, name: o.name, pid: o.pid)
                         } else {
-                            self.notify("端口暂时无法绑定，请稍后重试或换个监听端口。", title: "启动失败")
+                            me.notify("端口暂时无法绑定，请稍后重试或换个监听端口。", title: "启动失败")
                         }
-                    } else if let hint = self.serverFailureHint() {
-                        self.notify(hint, title: "启动失败")
+                    } else if let hint = me.serverFailureHint() {
+                        me.notify(hint, title: "启动失败")
                     } else {
-                        self.notify("请查看运行日志", title: "启动失败")
+                        me.notify("请查看运行日志", title: "启动失败")
                     }
                 }
             }
@@ -1270,6 +1273,43 @@ final class AppState: NSObject, ObservableObject {
             log("[系统] WebDAV 还原失败：\(msg)")
             showInfoDialog(title: "WebDAV 还原失败", text: "服务器连接失败")
         }
+    }
+
+    /// 删除 WebDAV 服务器上的备份文件（不删本地配置）。
+    func deleteWebDAVBackup() async {
+        guard let w = config.webdav, !w.url.isEmpty else {
+            showInfoDialog(title: "删除远程WebDAV备份", text: "请先填写 WebDAV 地址")
+            return
+        }
+        guard let url = WebDAVClient.endpoint(w.url, directory: w.directory) else {
+            showInfoDialog(title: "删除远程WebDAV备份", text: "WebDAV 地址无效")
+            return
+        }
+        guard let password = webdavPassword else {
+            showInfoDialog(title: "删除远程WebDAV备份", text: "请先设置 WebDAV 密码")
+            return
+        }
+        webdavBusy = true
+        defer { webdavBusy = false }
+        do {
+            try await WebDAVClient.delete(from: url, username: w.username, password: password)
+            log("[系统] 已删除 WebDAV 上的备份")
+            showInfoDialog(title: "删除远程WebDAV备份", text: "已删除 WebDAV 上的备份")
+        } catch {
+            let msg = describeWebDAVError(error)
+            log("[系统] 删除远程WebDAV备份失败：\(msg)")
+            showInfoDialog(title: "删除远程WebDAV备份失败", text: "服务器连接失败")
+        }
+    }
+
+    /// 删除已保存的 WebDAV 服务器设置（含钥匙串里的密码），不再作为备份目标。
+    func removeWebDAVServer() {
+        if let u = config.webdav?.username, !u.isEmpty {
+            KeychainStore.delete(account: u)
+        }
+        config.webdav = nil
+        persist()
+        log("[系统] 已删除 WebDAV 服务器")
     }
 
     /// App 退出前的收尾：停内核 + 还原系统代理，避免把用户网络留在坏状态。

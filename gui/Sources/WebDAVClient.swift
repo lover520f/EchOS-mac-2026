@@ -49,6 +49,18 @@ enum WebDAVClient {
         return data
     }
 
+    /// 删除 WebDAV 服务器上的备份文件（HTTP DELETE）。
+    /// 文件本来就不存在（404）视为已删除，不报错。
+    static func delete(from url: URL, username: String, password: String) async throws {
+        var req = URLRequest(url: url)
+        req.httpMethod = "DELETE"
+        req.setValue(auth(username, password), forHTTPHeaderField: "Authorization")
+        let (_, resp) = try await URLSession.shared.data(for: req)
+        guard let http = resp as? HTTPURLResponse else { return }
+        if http.statusCode == 404 { return }
+        guard (200...299).contains(http.statusCode) else { throw WebDAVError.badStatus(http.statusCode) }
+    }
+
     private static func auth(_ u: String, _ p: String) -> String {
         "Basic " + Data("\(u):\(p)".utf8).base64EncodedString()
     }

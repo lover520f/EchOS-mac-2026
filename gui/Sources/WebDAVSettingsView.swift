@@ -9,6 +9,7 @@ struct WebDAVSettingsView: View {
     @State private var username = ""
     @State private var password = ""
     @State private var directory = ""
+    @State private var confirmDelete = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -25,6 +26,8 @@ struct WebDAVSettingsView: View {
                 .textFieldStyle(.roundedBorder)
 
             HStack {
+                Button("删除 WebDAV 服务器…", role: .destructive) { confirmDelete = true }
+                    .disabled(app.config.webdav == nil)
                 Spacer()
                 Button("取消") { show = false }
                 Button("保存") { save() }
@@ -34,6 +37,15 @@ struct WebDAVSettingsView: View {
         }
         .padding(16)
         .frame(width: 400)
+        .alert("删除 WebDAV 服务器？", isPresented: $confirmDelete) {
+            Button("取消", role: .cancel) {}
+            Button("删除", role: .destructive) {
+                app.removeWebDAVServer()
+                show = false
+            }
+        } message: {
+            Text("将移除已保存的 WebDAV 服务器设置，并清除钥匙串中的密码，不可撤销。")
+        }
         .onAppear {
             if let w = app.config.webdav {
                 url = w.url

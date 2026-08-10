@@ -58,7 +58,8 @@ cp "$ROOT/gui/Info.plist" "$APP/Contents/Info.plist"
 # 也可用环境变量 ECH_UPDATE_REPO 手动覆盖（CI 里由 ${{ github.repository }} 传入）。
 # 拿不到仓库地址时不注入该键，界面上的「检查更新」会提示未配置，不暴露地址。
 if [ -z "${ECH_UPDATE_REPO:-}" ]; then
-  _remote=$(git -C "$ROOT" config --get remote.origin.url 2>/dev/null)
+  _remote=""
+  _remote=$(git -C "$ROOT" config --get remote.origin.url 2>/dev/null) || true
   case "$_remote" in
     git@github.com:*|ssh://git@github.com/*)
       ECH_UPDATE_REPO=$(echo "$_remote" | sed -E 's#.*github\.com[/:]##; s#\.git$##')

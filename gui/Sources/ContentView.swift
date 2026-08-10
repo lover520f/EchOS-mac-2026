@@ -26,6 +26,8 @@ struct ContentView: View {
     @State private var pendingRestoreURL: URL?
     /// WebDAV 还原前二次确认
     @State private var confirmWebDAVRestore = false
+    /// 删除远程 WebDAV 备份前二次确认
+    @State private var confirmWebDAVDelete = false
     /// 分享/备份按钮弹出 NSMenu 的 action 目标
     @State private var menuTarget = MenuActionTarget()
 
@@ -161,6 +163,12 @@ struct ContentView: View {
             Button("还原", role: .destructive) { Task { await app.restoreFromWebDAV() } }
         } message: {
             Text("当前全部配置（服务器、分流规则、偏好）都会被 WebDAV 上的备份覆盖。\n代理运行中会先停止。")
+        }
+        .alert("删除远程WebDAV备份？", isPresented: $confirmWebDAVDelete) {
+            Button("取消", role: .cancel) {}
+            Button("删除", role: .destructive) { Task { await app.deleteWebDAVBackup() } }
+        } message: {
+            Text("将删除 WebDAV 服务器上的备份文件，本地配置不受影响。\n备份文件不存在时视为已删除。")
         }
         .sheet(isPresented: $showShare) {
             ShareSheet(show: $showShare)
@@ -315,16 +323,15 @@ struct ContentView: View {
                         .font(.system(size: 12))
                         .foregroundColor(.secondary)
                 } else {
-                    Picker("", selection: Binding(
-                        get: { app.config.selectedID ?? app.config.servers.first?.id ?? UUID() },
-                        set: { id in Task { await app.select(id) } }
-                    )) {
-                        ForEach(Array(app.config.servers.enumerated()), id: \.element.id) { index, s in
-                            // 空名按位置编号显示，避免同时出现多个一模一样的「未命名」
-                            Text(s.name.isEmpty ? "未命名 \(index + 1)" : s.name).tag(s.id)
+                    NativePopupSelect(
+                        selection: Binding(
+                            get: { app.config.selectedID ?? app.config.servers.first?.id ?? UUID() },
+                            set: { id in Task { await app.select(id) } }
+                        ),
+                        options: app.config.servers.enumerated().map {
+                            (title: $0.element.name.isEmpty ? "未命名 \($0.offset + 1)" : $0.element.name, value: $0.element.id)
                         }
-                    }
-                    .labelsHidden()
+                    )
                     // 运行中切换服务器会重启代理换到新服务器生效（见 AppState.select）
                 }
 
@@ -387,6 +394,7 @@ struct ContentView: View {
                     menuTarget.onWebDAVSettings = { showWebDAV = true }
                     menuTarget.onBackupWebDAV = { Task { await app.backupToWebDAV() } }
                     menuTarget.onRestoreWebDAV = { confirmWebDAVRestore = true }
+                    menuTarget.onDeleteWebDAV = { confirmWebDAVDelete = true }
                     let menu = NSMenu()
                     let bl = NSMenuItem(title: "备份到本地文件…", action: #selector(MenuActionTarget.backupLocal), keyEquivalent: "")
                     bl.target = menuTarget
@@ -394,16 +402,19 @@ struct ContentView: View {
                     rl.target = menuTarget
                     let ws = NSMenuItem(title: "WebDAV 设置…", action: #selector(MenuActionTarget.webdavSettings), keyEquivalent: "")
                     ws.target = menuTarget
-                    let bw = NSMenuItem(title: "备份到 WebDAV", action: #selector(MenuActionTarget.backupWebDAV), keyEquivalent: "")
+                    let bw = NSMenuItem(title: "备份到远程WebDAV", action: #selector(MenuActionTarget.backupWebDAV), keyEquivalent: "")
                     bw.target = menuTarget
-                    let rw = NSMenuItem(title: "从 WebDAV 还原…", action: #selector(MenuActionTarget.restoreWebDAV), keyEquivalent: "")
+                    let rw = NSMenuItem(title: "从远程WebDAV还原备份", action: #selector(MenuActionTarget.restoreWebDAV), keyEquivalent: "")
                     rw.target = menuTarget
+                    let dw = NSMenuItem(title: "删除远程WebDAV备份", action: #selector(MenuActionTarget.deleteWebDAV), keyEquivalent: "")
+                    dw.target = menuTarget
                     menu.addItem(bl)
                     menu.addItem(rl)
                     menu.addItem(.separator())
                     menu.addItem(ws)
                     menu.addItem(bw)
                     menu.addItem(rw)
+                    menu.addItem(dw)
                     menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
                 } label: {
                     Label(app.webdavBusy ? "备份中…" : "备份", systemImage: "externaldrive")
@@ -435,10 +446,25 @@ struct ContentView: View {
     private var coreGroup: some View {
         group("核心配置", icon: "gearshape.fill", tint: .indigo) {
             VStack(spacing: 8) {
-                hostPortRow("服务地址:", host: binding(\.server), port: intBinding(\.serverPort),
-                            hostPlaceholder: "xxx.workers.dev")
+                maskedHostPortRow("服务器地址:", host: binding(\.server), port: intBinding(\.serverPort),
+                                  hostPlaceholder: "xxx.workers.dev")
+                maskedRow("TOKEN(可选):", binding(\.token), placeholder: "")
                 hostPortRow("监听地址:", host: binding(\.listen), port: intBinding(\.listenPort),
                             hostPlaceholder: "127.0.0.1")
+                row("优选域名(IP):", binding(\.ip), placeholder: "cdns.doon.eu.org")
+            }
+        }
+    }
+
+    // MARK: - 高级选项
+
+    private var optionalGroup: some View {
+        group("高级选项", icon: "slider.horizontal.3", tint: .orange) {
+            VStack(spacing: 8) {
+                presetRow("ECH域名:", binding(\.ech), options: EchPresets.echDomains,
+                          placeholder: "cloudflare-ech.com")
+                presetRow("DOH服务器:", binding(\.dns), options: EchPresets.dnsServers,
+                          placeholder: "dns.alidns.com/dns-query")
 
                 HStack(spacing: 8) {
                     Text("分流模式:")
@@ -453,21 +479,6 @@ struct ContentView: View {
                         disabled: false
                     )
                 }
-            }
-        }
-    }
-
-    // MARK: - 高级选项（可选）
-
-    private var optionalGroup: some View {
-        group("高级选项", icon: "slider.horizontal.3", tint: .orange) {
-            VStack(spacing: 8) {
-                row("TOKEN(可选):", binding(\.token), placeholder: "")
-                row("优选IP(域名):", binding(\.ip), placeholder: "104.16.158.132")
-                presetRow("ECH域名:", binding(\.ech), options: EchPresets.echDomains,
-                          placeholder: "cloudflare-ech.com")
-                presetRow("DOH服务器:", binding(\.dns), options: EchPresets.dnsServers,
-                          placeholder: "dns.alidns.com/dns-query")
 
                 Divider().padding(.vertical, 2)
                 customRulesSection
@@ -775,13 +786,14 @@ struct ContentView: View {
                 Spacer()
 
                 if app.config.logVisible {
-                    Picker("", selection: Binding(
-                        get: { app.config.logLevel },
-                        set: { v in app.config.logLevel = v; app.persist() }
-                    )) {
-                        ForEach(LogLevel.allCases) { l in Text(l.title).tag(l) }
-                    }
-                    .labelsHidden()
+                    NativePopupSelect(
+                        selection: Binding(
+                            get: { app.config.logLevel },
+                            set: { v in app.config.logLevel = v; app.persist() }
+                        ),
+                        options: LogLevel.allCases.map { (title: $0.title, value: $0) },
+                        controlSize: .small
+                    )
                     .frame(width: 96)
 
                     Button {
@@ -910,6 +922,67 @@ struct ContentView: View {
         }
     }
 
+    /// 敏感单行：原生 TextField，不聚焦时用圆点盖住明文；点击聚焦后正常显示编辑。
+    @ViewBuilder
+    private func maskedRow(_ label: String, _ text: Binding<String>, placeholder: String) -> some View {
+        HStack(spacing: 8) {
+            Text(label)
+                .font(.system(size: 12.5))
+                .frame(width: labelWidth, alignment: .leading)
+            MaskedField(text: text, placeholder: placeholder)
+        }
+    }
+
+    /// 敏感主机名 + 端口：主机名圆点遮盖，端口保持可见（端口不是秘密）。
+    @ViewBuilder
+    private func maskedHostPortRow(_ label: String, host: Binding<String>, port: Binding<Int>,
+                                   hostPlaceholder: String) -> some View {
+        HStack(spacing: 8) {
+            Text(label)
+                .font(.system(size: 12.5))
+                .frame(width: labelWidth, alignment: .leading)
+            MaskedField(text: host, placeholder: hostPlaceholder)
+            Text("端口：")
+                .font(.system(size: 12))
+                .foregroundColor(.secondary)
+            TextField("", value: port, format: .number.grouping(.never))
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 12.5, design: .monospaced))
+                .frame(width: 96, height: 24)
+                .multilineTextAlignment(.center)
+        }
+    }
+
+    /// 敏感字段：保存后显示星号掩码；点击/聚焦后显示原文可编辑，失焦回到星号。
+    /// 真实 TextField 始终在最上层接收点击，掩码层放下面且不拦截命中。
+    private struct MaskedField: View {
+        @Binding var text: String
+        var placeholder: String
+        @FocusState private var focused: Bool
+
+        var body: some View {
+            ZStack {
+                if !focused && !text.isEmpty {
+                    Text(String(repeating: "*", count: text.count))
+                        .font(.system(size: 12.5, design: .monospaced))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 7)
+                        .allowsHitTesting(false)
+                }
+                TextField(placeholder, text: $text)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 12.5, design: .monospaced))
+                    .foregroundColor(focused || text.isEmpty ? .primary : .clear)
+                    .focused($focused)
+                    .frame(maxWidth: .infinity, minHeight: 24, maxHeight: 24)
+            }
+            .frame(maxWidth: .infinity, minHeight: 24, maxHeight: 24)
+        }
+    }
+
     /// 输入框 + 快捷填入下拉。
     /// 下拉不接管这个字段，只是往输入框里填一个常用值 ——
     /// 做成"选预设"和"自定义"二选一是错的：用户想在预设基础上改一个字，
@@ -999,6 +1072,7 @@ final class MenuActionTarget: NSObject {
     var onWebDAVSettings: (() -> Void)?
     var onBackupWebDAV: (() -> Void)?
     var onRestoreWebDAV: (() -> Void)?
+    var onDeleteWebDAV: (() -> Void)?
 
     @objc func shareExport() { onShareExport?() }
     @objc func shareImport() { onShareImport?() }
@@ -1007,4 +1081,5 @@ final class MenuActionTarget: NSObject {
     @objc func webdavSettings() { onWebDAVSettings?() }
     @objc func backupWebDAV() { onBackupWebDAV?() }
     @objc func restoreWebDAV() { onRestoreWebDAV?() }
+    @objc func deleteWebDAV() { onDeleteWebDAV?() }
 }
