@@ -108,6 +108,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// 否则底部操作行和日志会被窗口底边盖住。
     static var minContentHeight: CGFloat = 758
 
+    /// 用户最后一次手动拖拽结束后的窗口高度（0 = 从未手动拖过）。
+    /// 只有 windowDidEndLiveResize（真正的用户拖拽）才写它，
+    /// 程序 setFrame 不会触发。syncWindowHeight 靠它区分「用户拉高」
+    /// 和「内容自己变矮但窗口没跟上」，避免把后者误当成前者而拒绝缩回。
+    static var lastUserResizeHeight: CGFloat = 0
+
     // 拖拽窗口时强制高度不能低于内容所需高度（minSize 之外的兜底）
     @objc func windowWillResize(_ sender: NSWindow, to frameSize: NSSize) -> NSSize {
         let floor = max(Self.minContentHeight, sender.minSize.height)
@@ -115,6 +121,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         var s = frameSize
         s.height = floor
         return s
+    }
+
+    /// 用户拖拽结束后记下最终高度，供 syncWindowHeight 判断手动拉伸。
+    @objc func windowDidEndLiveResize(_ notification: Notification) {
+        if let win = notification.object as? NSWindow {
+            Self.lastUserResizeHeight = win.frame.height
+        }
     }
 
     // 移动/缩放窗口时，底边不许越过可见区域底部（否则日志会被 Dock 遮住）

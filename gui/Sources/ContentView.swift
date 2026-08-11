@@ -33,45 +33,53 @@ struct ContentView: View {
 
     private let labelWidth: CGFloat = 82
 
-    /// 底部固定区（操作行 + 日志）的高度。写死是为了能反过来算出
-    /// 滚动区该有多高 —— 交给 SwiftUI 自动分配时，ScrollView 会按内容
-    /// 撑开并溢出到这块区域上，规则一展开就盖住"开机启动"那一行。
-    private let bottomBlockHeight: CGFloat = 190
-
     var body: some View {
         GeometryReader { geo in
-            VStack(alignment: .leading, spacing: 0) {
-                titleBar
+            ZStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 0) {
+                    titleBar
+                        .padding(.horizontal, 16)
+
+                    // 配置区按内容自然排布，不用滚动条。窗口最小高度由
+                    // syncWindowHeight 跟着内容一起定，拉到下限就停，
+                    // 底部操作行和日志永远不会被窗口底边盖住。
+                    VStack(alignment: .leading, spacing: 12) {
+                        serverGroup
+                        coreGroup
+                        optionalGroup()
+                    }
                     .padding(.horizontal, 16)
 
-                // 配置区按内容自然排布，不用滚动条。窗口最小高度由
-                // syncWindowHeight 跟着内容一起定，拉到下限就停，
-                // 底部操作行和日志永远不会被窗口底边盖住。
-                VStack(alignment: .leading, spacing: 12) {
-                    serverGroup
-                    coreGroup
-                    optionalGroup
-                }
-                .padding(.horizontal, 16)
+                    // 固定间隔，不参与空间分配
+                    Color.clear.frame(height: 10)
 
-                // 固定间隔，不参与空间分配
-                Color.clear.frame(height: 10)
-
-                // 底部固定区。日志区弹性高度：窗口被拉高时它跟着变高
-                // （多几行日志），缩回时不低于最少 4 行。底部边距固定。
-                VStack(alignment: .leading, spacing: 10) {
-                    actionRow
-                    logSection()
+                    // 底部固定区。日志区弹性高度：窗口被拉高时它跟着变高
+                    // （多几行日志），缩回时不低于最少 4 行。底部边距固定。
+                    // 日志展开时整块锚定到底部，弹性日志撑满、贴底；
+                    // 日志折叠时保持自然高度紧贴配置区，多余空间落到窗口底部，
+                    // 不会在「规则」和底部操作行之间挤出中间空白。
+                    VStack(alignment: .leading, spacing: 10) {
+                        actionRow
+                        logSection()
+                    }
+                    .frame(maxHeight: app.config.logVisible ? .infinity : nil,
+                           alignment: .bottom)
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 10)
                 }
-                .frame(maxHeight: .infinity, alignment: .top)
-                .padding(.horizontal, 16)
-                .padding(.bottom, 10)
+                // 高度跟窗口走：窗口高度由 syncWindowHeight 按内容精确设定，
+                // 日志区是弹性块，吃掉窗口比内容多的那点余量，永远贴底
+                .frame(width: geo.size.width, height: geo.size.height, alignment: .top)
+
+                // 隐藏探针：镜像内容但用 fixedSize 测「理想高度」，
+                // 不随窗口拉伸变化（日志区按固定槽位算，不按实际渲染高度）。
+                layoutProbe(width: geo.size.width)
+                    .allowsHitTesting(false)
             }
-            // 高度跟窗口走：窗口高度由 syncWindowHeight 按内容精确设定，
-            // 日志区是弹性块，吃掉窗口比内容多的那点余量，永远贴底
-            .frame(width: geo.size.width, height: geo.size.height, alignment: .top)
         }
         .frame(minWidth: 735, minHeight: 620)
+        .onPreferenceChange(ContentHeightKey.self) { contentIdealHeight = $0 }
+        .onChange(of: contentIdealHeight) { _ in syncWindowHeight() }
         .onAppear {
             // 服务器列表为空（全新安装，或配置文件里没有服务器）：直接建一个
             // 待起名的服务器并弹命名框，不显示「还没有服务器」空态 ——
@@ -82,6 +90,7 @@ struct ContentView: View {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { syncWindowHeight() }
         }
         .onChange(of: rulesExpanded) { _ in syncWindowHeight() }
+        .onChange(of: app.config.logVisible) { _ in syncWindowHeight() }
         .onChange(of: app.selected?.customRules.count ?? 0) { _ in syncWindowHeight() }
         .onChange(of: app.needsNameInput) { need in
             if need {
@@ -193,37 +202,110 @@ struct ContentView: View {
     /// 是用户手动拉的，尊重它，不去缩回。
     @State private var lastSetHeight: CGFloat = 0
 
-    private func syncWindowHeight() {
-        let ruleCount = app.selected?.customRules.count ?? 0
-        var h: CGFloat = 758          // 基准：规则收起时窗口 frame 高度（日志区约 5 行）
-        if rulesExpanded {
-            h += 46                   // 展开区：标题行间隔 + 底部状态行
-            h += min(CGFloat(ruleCount), 3) * 36   // 规则行（30 高 + 6 间隔），最多 3 行
-            if ruleCount > 3 { h += 24 }           // 超过 3 条才出现的搜索框
-        }
+    /// 日志区高度的理想下限与探针槽位（保底 4 行）。
+    /// 展开时窗口按「内容 + 槽位」配高，规则把内容顶高时日志至少保住这 4 行；
+    /// 用户手动拉高窗口时，真实日志区才是弹性块、吃满余量多显示几行。
+    /// 10.5pt 等宽字实测行高 13.0pt，LazyVStack 1pt 间距 → 每行占 14pt。
+    /// 槽位 = 4×14 = 56（内边距在滚动区外面，不算内容高）：
+    /// 滚到底正好显示完整 4 行，第 5 行只从滚动条可见，不会露残影。
+    private let logSlotHeight: CGFloat = 56
 
+    /// 极端小屏下日志区允许再压到的硬下限（约 1 行）。
+    /// 只在「内容超出屏幕可见区」时启用；正常屏幕（含规则全展开）都能装下时，
+    /// 日志始终是 logSlotHeight（4 行）。宁可把日志压到 1 行，也不让窗口
+    /// 溢出屏幕或裁掉底边 —— 底边距在任何状态下都保持固定。
+    private let logFloorHeight: CGFloat = 16
+
+    /// 屏幕可见区能容纳的窗口最大高度（扣菜单栏+Dock 各留 20pt）。
+    /// 由 syncWindowHeight 每次同步时写入，日志区用它判断要不要压缩保底行数。
+    @State private var screenMaxH: CGFloat = .infinity
+
+    /// 标题栏占位高度：窗口 frame 比 contentLayoutRect 多出的那截。
+    /// 压缩日志用的内容上限 = screenMaxH - titlebarInset，
+    /// 不减去它就会把超出量算少，日志压不够、底边照样被窗口裁掉。
+    @State private var titlebarInset: CGFloat = 28
+
+    /// 日志区实际保底高度：内容不超屏就是 logSlotHeight（4 行）；
+    /// 超屏（小屏 + 规则全展开）时把超出量从日志区扣掉，压到 logFloorHeight 为止，
+    /// 保证窗口贴屏幕装下、底边不被裁掉，而不是把日志硬挤出画面。
+    private var logMinHeight: CGFloat {
+        let contentCap = screenMaxH - titlebarInset
+        return max(logFloorHeight, logSlotHeight - max(0, contentIdealHeight - contentCap))
+    }
+
+    /// 隐藏探针测出的内容理想高度：展开 = 内容 + 日志槽位，折叠 = 内容。
+    /// 窗口高度始终贴着这个值，展开/折叠/规则变化都由它驱动，不再手算各种增量。
+    @State private var contentIdealHeight: CGFloat = 688
+
+    /// 内容理想高度的 PreferenceKey，由隐藏探针上报
+    struct ContentHeightKey: PreferenceKey {
+        static var defaultValue: CGFloat = 688
+        static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+            value = nextValue()
+        }
+    }
+
+    private func syncWindowHeight() {
         DispatchQueue.main.async {
-            guard let win = NSApp.windows.first(where: { $0.contentView != nil }) else { return }
-            // 最小高度跟内容走：手动把窗口拖矮到当前内容所需高度就停，
-            // 操作行和日志永远不会被窗口底边盖住。
+            guard let win = NSApp.windows.first(where: { $0.contentView != nil }),
+                  let screen = win.screen else { return }
+
+            let current = win.frame.size.height
+            let collapsed = !app.config.logVisible
+
+            // 窗口 frame 高度 = 内容所需高度 + 标题栏占位。
+            // contentLayoutRect 是不含标题栏的可放内容区域，frame 比它多出的
+            // 高度就是标题栏（透明隐藏也占 28pt）。不补上这段，内容会把底部
+            // 挤出窗口 —— 日志区下半截就会被窗口底边盖住。
+            let titlebar = max(0, current - win.contentLayoutRect.height)
+            titlebarInset = titlebar
+
+            var h = contentIdealHeight + titlebar
+
+            let maxH = max(0, screen.visibleFrame.height - 40)
+            screenMaxH = maxH
+            if h > maxH { h = maxH }
+
             AppDelegate.minContentHeight = h
             win.minSize = NSSize(width: 735, height: h)
-            let current = win.frame.size.height
 
-            // 用户手动拉高过窗口（比上次程序设定的还高），保持原样，
-            // 只更新最小高度。这样手动拉伸的高度不会被内容变化顶回去。
-            if lastSetHeight > 0 && current > lastSetHeight + 4 { return }
+            // 手动拉伸保护：只有用户真拖过窗口（windowDidEndLiveResize 记下的
+            // 高度）才保持用户拉高的高度；内容自己变矮但窗口没跟上时不算
+            // 手动拉伸，要跟着内容缩回来 —— 否则日志会被多出来的空档撑成 5 行。
+            if !collapsed {
+                let userH = AppDelegate.lastUserResizeHeight
+                if userH > 0 && abs(current - userH) <= 2 && h <= current + 1 {
+                    // 窗口停在用户拖过的位置：保持原样，只更新最小高度并重新居中。
+                    // 内容若是已经超过这个高度（h > current），就不保持、跟着长。
+                    centerWindow(screen: screen, height: current)
+                    lastSetHeight = h
+                    return
+                }
 
-            // 首次：直接设准；之后内容需要的比现在高就长高，比现在矮就缩回。
-            if lastSetHeight > 0 && abs(current - h) <= 4 { return }
+                // 高度没变化：只重新居中，不折腾尺寸
+                if lastSetHeight > 0 && abs(current - h) <= 4 {
+                    centerWindow(screen: screen, height: current)
+                    return
+                }
+            }
+
             var f = win.frame
-            f.origin.y += (f.size.height - h)            // 顶边不动，往下长
             f.size.height = h
-            // 不用动画：加高是跟内容走的，动画过程里内容已经长出来，
-            // 拖着的过渡反而会把日志区压扁，看着像和底部重叠
             win.setFrame(f, display: true, animate: false)
+            centerWindow(screen: screen, height: h)
             lastSetHeight = h
         }
+    }
+
+    /// 在可见区（扣除菜单栏 + Dock）内把窗口垂直水平居中。
+    private func centerWindow(screen: NSScreen, height: CGFloat) {
+        guard let win = NSApp.windows.first(where: { $0.contentView != nil }) else { return }
+        let vf = screen.visibleFrame
+        var f = win.frame
+        f.size.height = height
+        f.origin.x = vf.midX - f.size.width / 2
+        f.origin.y = vf.midY - height / 2
+        win.setFrame(f, display: true, animate: false)
     }
 
     // MARK: - 分享 / 备份面板
@@ -458,7 +540,7 @@ struct ContentView: View {
 
     // MARK: - 高级选项
 
-    private var optionalGroup: some View {
+    private func optionalGroup(rulesForcedExpanded: Bool = false) -> some View {
         group("高级选项", icon: "slider.horizontal.3", tint: .orange) {
             VStack(spacing: 8) {
                 presetRow("ECH域名:", binding(\.ech), options: EchPresets.echDomains,
@@ -481,14 +563,14 @@ struct ContentView: View {
                 }
 
                 Divider().padding(.vertical, 2)
-                customRulesSection
+                customRulesSection(forcedExpanded: rulesForcedExpanded)
             }
         }
     }
 
     // MARK: - 自定义分流规则
 
-    private var customRulesSection: some View {
+    private func customRulesSection(forcedExpanded: Bool = false) -> some View {
         let rules = app.selected?.customRules ?? []
         let shadowed = rules.shadowedIDs
         let filtered = ruleSearch.isEmpty ? rules : rules.filter { r in
@@ -500,10 +582,10 @@ struct ContentView: View {
                 || label.localizedCaseInsensitiveContains(ruleSearch)
         }
 
-        return DisclosureGroup(isExpanded: $rulesExpanded) {
+        return DisclosureGroup(isExpanded: forcedExpanded ? Binding.constant(true) : $rulesExpanded) {
             VStack(alignment: .leading, spacing: 7) {
-                // 规则一多，靠滚动翻找很费劲，给个搜索框
-                if rules.count > 3 {
+                // 规则一多，靠滚动翻找很费劲，给个搜索框（超过 2 条就出）
+                if rules.count > 2 {
                     HStack(spacing: 6) {
                         Image(systemName: "magnifyingglass")
                             .font(.system(size: 10.5))
@@ -539,10 +621,10 @@ struct ContentView: View {
                         }
                         .padding(.vertical, 2)
                     }
-                    // 高度跟着条数走，最多 3 行；再多就在列表内部滚动，
-                    // 不去牵动整页布局。行高固定 30，正好装下 3 行（90+12 间隔+4 内边距），
-                    // 第 4 条起点在 110 超过 106，被彻底裁掉，不会露出半截。
-                    .frame(height: CGFloat(min(filtered.count, 3)) * 36 - 2)
+                    // 高度跟着条数走，最多 2 行；再多就在列表内部滚动，
+                    // 不去牵动整页布局。行高固定 30，正好装下 2 行（60+12 间隔+4 内边距），
+                    // 第 3 条起点在 74 超过 70，被彻底裁掉，不会露出半截。
+                    .frame(height: CGFloat(min(filtered.count, 2)) * 36 - 2)
                     .clipped()
                 }
 
@@ -677,7 +759,6 @@ struct ContentView: View {
 
     private var actionRow: some View {
         VStack(spacing: 10) {
-            // 四个控件统一放一行：左边两个开关，右边两个按钮
             HStack(spacing: 14) {
                 Toggle("开机启动", isOn: Binding(
                     get: { app.launchAtLogin },
@@ -767,51 +848,57 @@ struct ContentView: View {
 
     // MARK: - 运行日志
 
-    private func logSection() -> some View {
-        VStack(alignment: .leading, spacing: 5) {
-            HStack(spacing: 10) {
-                Button {
-                    app.config.logVisible.toggle()
-                    app.persist()
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: app.config.logVisible ? "chevron.down" : "chevron.right")
-                            .font(.system(size: 9, weight: .semibold))
-                        Text(app.config.logLevel == .checkOnly ? "自检记录" : "运行日志")
-                            .font(.system(size: 12))
-                    }
-                }
-                .buttonStyle(.plain)
-
-                Spacer()
-
-                if app.config.logVisible {
-                    NativePopupSelect(
-                        selection: Binding(
-                            get: { app.config.logLevel },
-                            set: { v in app.config.logLevel = v; app.persist() }
-                        ),
-                        options: LogLevel.allCases.map { (title: $0.title, value: $0) },
-                        controlSize: .small
-                    )
-                    .frame(width: 96)
-
-                    Button {
-                        // 打开当前视图对应的那个文件，而不是永远打开运行日志
-                        let url = app.config.logLevel == .checkOnly ? LogFile.checkURL : LogFile.currentURL
-                        NSWorkspace.shared.activateFileViewerSelecting([url])
-                    } label: {
-                        Label("日志文件", systemImage: "folder")
-                    }
-
-                    Button {
-                        app.clearLog()
-                    } label: {
-                        Label("清空", systemImage: "trash")
-                    }
+    /// 日志标题行：折叠按钮 + 级别选择 + 日志文件 + 清空。
+    /// 折叠日志时这一行常驻，探针也复用它来量「日志头部」的高度。
+    private var logHeaderRow: some View {
+        HStack(spacing: 10) {
+            Button {
+                app.config.logVisible.toggle()
+                app.persist()
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: app.config.logVisible ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 9, weight: .semibold))
+                    Text(app.config.logLevel == .checkOnly ? "自检记录" : "运行日志")
+                        .font(.system(size: 12))
                 }
             }
-            .controlSize(.small)
+            .buttonStyle(.plain)
+
+            Spacer()
+
+            // 折叠只收起日志内容；级别/日志文件/清空这些控制项保持常驻，
+            // 不会跟着内容一起消失
+            NativePopupSelect(
+                selection: Binding(
+                    get: { app.config.logLevel },
+                    set: { v in app.config.logLevel = v; app.persist() }
+                ),
+                options: LogLevel.allCases.map { (title: $0.title, value: $0) },
+                controlSize: .small
+            )
+            .frame(width: 96)
+
+            Button {
+                // 打开当前视图对应的那个文件，而不是永远打开运行日志
+                let url = app.config.logLevel == .checkOnly ? LogFile.checkURL : LogFile.currentURL
+                NSWorkspace.shared.activateFileViewerSelecting([url])
+            } label: {
+                Label("日志文件", systemImage: "folder")
+            }
+
+            Button {
+                app.clearLog()
+            } label: {
+                Label("清空", systemImage: "trash")
+            }
+        }
+        .controlSize(.small)
+    }
+
+    private func logSection() -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            logHeaderRow
 
             if app.config.logVisible {
                 ScrollViewReader { proxy in
@@ -826,7 +913,6 @@ struct ContentView: View {
                                     .id(idx)
                             }
                         }
-                        .padding(8)
                     }
                     .onChange(of: app.logLines.count) { _ in
                         if let last = app.logLines.indices.last {
@@ -834,13 +920,54 @@ struct ContentView: View {
                         }
                     }
                 }
+                // 内边距放在滚动区外面，不占滚动内容高度：
+                // 内容高 = 行数 × 14（13pt 字 + 1pt 间距），视图高 = 槽位 = 4×14 = 56，
+                // 滚到底正好显示完整 4 行，不会多露一行残影。
+                .frame(minHeight: logMinHeight, maxHeight: .infinity)
+                .padding(8)
                 .frostedCard()
-                // 弹性高度：默认 4 行，窗口被手动拉高时跟着变高。
-                // 窗口高度是按内容精确算的，所以它平时就停在最少 4 行；
-                // 用户手动把窗口拉高时，多的空间全给日志区。
-                .frame(minHeight: 60, maxHeight: .infinity)
             }
         }
+    }
+
+    /// 隐藏探针：与真实内容同构，但日志滚动区按固定槽位估算，并用 fixedSize
+    /// 量「理想高度」—— 这个高度跟窗口实际被拉多高无关，是内容真实需要的。
+    /// 窗口高度由它驱动（见 syncWindowHeight），展开/折叠/规则变化自动适配。
+    private func layoutProbe(width: CGFloat) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            titleBar
+                .padding(.horizontal, 16)
+            VStack(alignment: .leading, spacing: 12) {
+                serverGroup
+                coreGroup
+                optionalGroup()
+            }
+            .padding(.horizontal, 16)
+
+            Color.clear.frame(height: 10)
+
+            VStack(alignment: .leading, spacing: 10) {
+                actionRow
+                VStack(alignment: .leading, spacing: 5) {
+                    logHeaderRow
+                    if app.config.logVisible {
+                        // 槽位必须用能贡献实际高度的视图：Color.clear 在 fixedSize
+                        // 下理想尺寸是 0，量出来日志区永远不占位，窗口就不跟随展开了。
+                        // padding(8) 要跟真实布局一致：真实日志滚动区外套 8pt 内边距，
+                        // 探针不补这段，窗口就会比内容矮 16pt，卡片底边被窗口裁掉。
+                        Text(" ").frame(width: width, height: logSlotHeight).padding(8)
+                    }
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.bottom, 10)
+        }
+        .frame(width: width, alignment: .top)
+        .fixedSize(horizontal: false, vertical: true)
+        .overlay(alignment: .topLeading) { GeometryReader { p in
+            Color.clear.preference(key: ContentHeightKey.self, value: p.size.height)
+        } }
+        .opacity(0)
     }
 
     // MARK: - 复用组件

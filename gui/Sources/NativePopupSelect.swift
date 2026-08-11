@@ -20,10 +20,14 @@ struct NativePopupSelect<T: Hashable>: NSViewRepresentable {
         b.target = context.coordinator
         b.action = #selector(Coordinator.changed(_:))
         b.font = .systemFont(ofSize: 12.5)
+        // 按钮宽度只由内容决定：NSPopUpButton 的水平 hugging 默认偏低，
+        // 放进 SwiftUI 的 HStack 会被拉宽吃满剩余空间 —— 页面拉宽时按钮跟着
+        // 变长。设为 required 后它始终保持固有宽度，多余空间留给 Spacer。
+        b.setContentHuggingPriority(.required, for: .horizontal)
+        b.setContentCompressionResistancePriority(.required, for: .horizontal)
         rebuild(b)
         return b
     }
-
     func updateNSView(_ b: NSPopUpButton, context: Context) {
         context.coordinator.parent = self
         rebuild(b)

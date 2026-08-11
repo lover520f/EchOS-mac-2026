@@ -69,7 +69,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
 
         // 云朵用代码画（见 CloudIcon）：空心=未接管、实心=已接管。
         // 形状本身就能分辨状态，不必只依赖颜色。
-        let img = CloudIcon.make(filled: ready, size: 18)
+        let img = CloudIcon.make(filled: ready, size: 22)
         button.image = img.tinted(Self.color(ready: ready))
         // 不设 toolTip：无 Dock 图标（accessory 模式）下，鼠标悬停后
         // tooltip 面板可能不消失，卡成菜单栏下方一个点不掉、点不动的幽灵窗。
