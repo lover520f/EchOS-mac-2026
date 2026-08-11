@@ -953,8 +953,10 @@ struct ContentView: View {
         }
     }
 
-    /// 敏感字段：保存后显示星号掩码；点击/聚焦后显示原文可编辑，失焦回到星号。
-    /// 真实 TextField 始终在最上层接收点击，掩码层放下面且不拦截命中。
+    /// 敏感字段：保存后显示圆点掩码；点击/聚焦后显示原文可编辑，失焦回到掩码。
+    /// TextField 放底层、掩码文本放顶层（allowsHitTesting(false) 不拦截点击），
+    /// 否则掩码会被 TextField 圆角边框的背景盖住看不见。
+    /// 掩码用系统语义色 .secondary，深浅色模式自动适配。
     private struct MaskedField: View {
         @Binding var text: String
         var placeholder: String
@@ -962,6 +964,13 @@ struct ContentView: View {
 
         var body: some View {
             ZStack {
+                TextField(placeholder, text: $text)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 12.5, design: .monospaced))
+                    .foregroundColor(focused || text.isEmpty ? .primary : .clear)
+                    .focused($focused)
+                    .frame(maxWidth: .infinity, minHeight: 24, maxHeight: 24)
+
                 if !focused && !text.isEmpty {
                     Text(String(repeating: "*", count: text.count))
                         .font(.system(size: 12.5, design: .monospaced))
@@ -972,12 +981,6 @@ struct ContentView: View {
                         .padding(.horizontal, 7)
                         .allowsHitTesting(false)
                 }
-                TextField(placeholder, text: $text)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 12.5, design: .monospaced))
-                    .foregroundColor(focused || text.isEmpty ? .primary : .clear)
-                    .focused($focused)
-                    .frame(maxWidth: .infinity, minHeight: 24, maxHeight: 24)
             }
             .frame(maxWidth: .infinity, minHeight: 24, maxHeight: 24)
         }
