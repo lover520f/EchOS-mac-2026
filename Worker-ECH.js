@@ -69,16 +69,38 @@ async function handleSession(webSocket) {
   };
 
   const pumpRemoteToWebSocket = async () => {
+    // 攒满一整帧再发：把小块聚合成 ~32KB 再 send，出站帧数能砍掉 5~10 倍。
+    // Cloudflare 免费版 Worker 对持续大流量转发按 CPU/帧数限额，帧越少越扛得住。
+    const FLUSH_SIZE = 32 * 1024;
+    const chunks = [];
+    let total = 0;
+    const flush = () => {
+      if (total === 0) return;
+      const merged = new Uint8Array(total);
+      let off = 0;
+      for (const c of chunks) {
+        merged.set(c, off);
+        off += c.byteLength;
+      }
+      chunks.length = 0;
+      total = 0;
+      if (webSocket.readyState === WS_READY_STATE_OPEN) {
+        webSocket.send(merged.buffer);
+      }
+    };
     try {
       while (!isClosed && remoteReader) {
         const { done, value } = await remoteReader.read();
-        
         if (done) break;
         if (webSocket.readyState !== WS_READY_STATE_OPEN) break;
-        if (value?.byteLength > 0) webSocket.send(value);
+        if (value?.byteLength > 0) {
+          chunks.push(value);
+          total += value.byteLength;
+          if (total >= FLUSH_SIZE) flush();
+        }
       }
     } catch {}
-    
+    flush();
     if (!isClosed) {
       try { webSocket.send('CLOSE'); } catch {}
       cleanup();

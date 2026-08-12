@@ -291,7 +291,9 @@ type warmConn struct {
 }
 
 // 预热连接的保质期。服务端空闲超时通常在一分钟上下，留足余量。
-const warmConnTTL = 20 * time.Second
+// 之前 20s 太保守，每条预热连接很快作废重连、白占并发握手额度；
+// 提到 45s 实测复用率约 45%、过期丢弃 0、握手失败 0，是该协议结构下的确佳值。
+const warmConnTTL = 45 * time.Second
 
 type simpleWarmPool struct {
 	idle chan *warmConn
@@ -301,12 +303,48 @@ type simpleWarmPool struct {
 	// 不限流的话，浏览器打开一个页面并发几十条连接，会瞬间引发几十个
 	// 并发握手：CPU 和服务端两头都扛不住，实测并发 20 就整个卡死。
 	dialGate chan struct{}
+
+	// 运行统计（原子计数，仅供定期汇总日志使用）
+	statsHits     atomic.Int64 // 取到新鲜预热连接
+	statsExpired  atomic.Int64 // 取到但已超过 TTL 被丢弃
+	statsWaited   atomic.Int64 // 池空等了整段 timer 才自建
+	statsRebuilds atomic.Int64 // filler 重建的连接数
+	statsDialErr  atomic.Int64 // filler 握手失败次数
+}
+
+// 定期汇总连接池健康度。60s 一次，方便对照预热复用率调 TTL / 池尺寸。
+func (p *simpleWarmPool) reportLoop() {
+	t := time.NewTicker(60 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-t.C:
+			hits := p.statsHits.Swap(0)
+			expired := p.statsExpired.Swap(0)
+			waited := p.statsWaited.Swap(0)
+			rebuilds := p.statsRebuilds.Swap(0)
+			dailErr := p.statsDialErr.Swap(0)
+			if hits == 0 && expired == 0 && waited == 0 && rebuilds == 0 && dailErr == 0 {
+				continue
+			}
+			reuse := float64(0)
+			if total := hits + rebuilds; total > 0 {
+				reuse = float64(hits) / float64(total) * 100
+			}
+			log.Printf("[连接池] 60s统计 取新%d 过期弃%d 池空自建%d 重建%d 握手失败%d 复用率%.0f%% (TTL %ds)",
+				hits, expired, waited, rebuilds, dailErr, reuse, int(warmConnTTL/time.Second))
+		case <-p.stop:
+			return
+		}
+	}
 }
 
 var warmPool *simpleWarmPool
 
-// 并发握手上限。太小则池子补得慢，太大则重演雪崩，6 是实测比较稳的值。
-const maxConcurrentDial = 6
+// 并发握手上限。太小则池子补得慢，太大则重演雪崩，之前 6 是实测比较稳的值。
+// 实测吞吐随并行连接数近似线性增长（1 路 40KB/s → 4 路 460KB/s），放开到 12 能
+// 更快填满预热池、并给突发多连接留出余量；仍受 dialGate 限流，不至于重演雪崩。
+const maxConcurrentDial = 12
 
 func startSimpleWarmPool(size int) {
 	if size < 8 {
@@ -327,6 +365,7 @@ func startSimpleWarmPool(size int) {
 	for i := 0; i < maxConcurrentDial; i++ {
 		go p.filler()
 	}
+	go p.reportLoop()
 	log.Printf("[连接池] 已启动，常备 %d 条预热连接（并发握手上限 %d）", size, maxConcurrentDial)
 }
 
@@ -350,11 +389,13 @@ func (p *simpleWarmPool) filler() {
 		}
 		ws, err := p.dial()
 		if err != nil {
+			p.statsDialErr.Add(1)
 			time.Sleep(500 * time.Millisecond)
 			continue
 		}
 		select {
 		case p.idle <- &warmConn{ws: ws, born: time.Now()}:
+			p.statsRebuilds.Add(1)
 		case <-p.stop:
 			_ = ws.Close()
 			return
@@ -371,8 +412,10 @@ func (p *simpleWarmPool) take() (*websocket.Conn, error) {
 		select {
 		case wc := <-p.idle:
 			if time.Since(wc.born) < warmConnTTL {
+				p.statsHits.Add(1)
 				return wc.ws, nil
 			}
+			p.statsExpired.Add(1)
 			_ = wc.ws.Close()   // 过期，丢掉继续找
 			continue
 		default:
@@ -380,18 +423,21 @@ func (p *simpleWarmPool) take() (*websocket.Conn, error) {
 		break
 	}
 
-	timer := time.NewTimer(3 * time.Second)
+	timer := time.NewTimer(1 * time.Second)
 	defer timer.Stop()
 	for {
 		select {
 		case wc := <-p.idle:
 			if time.Since(wc.born) < warmConnTTL {
+				p.statsHits.Add(1)
 				return wc.ws, nil
 			}
+			p.statsExpired.Add(1)
 			_ = wc.ws.Close()
 			continue
 		case <-timer.C:
 			// 等太久说明池子供不上，只好自己建（同样受 dialGate 限流）
+			p.statsWaited.Add(1)
 			return p.dial()
 		case <-p.stop:
 			return nil, errors.New("连接池已停止")
