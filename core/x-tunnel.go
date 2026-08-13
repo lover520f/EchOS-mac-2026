@@ -1284,6 +1284,9 @@ func queryDoH(domain, dohURL string) (string, error) {
 			return dialPhysicalIPv4First(dialer, ctx, network, addr)
 		},
 		TLSHandshakeTimeout: 3 * time.Second,
+		// 自定义 DialContext 会让 Go 默认关闭 HTTP/2；显式打开，
+		// 否则只支持 HTTP/2 的 DoH（如 doh.onedns.net）会返回 HTTP/1.x malformed 报错。
+		ForceAttemptHTTP2: true,
 	}
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Timeout: 3 * time.Second, Transport: transport}

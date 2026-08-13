@@ -514,6 +514,9 @@ struct ContentView: View {
                 } label: {
                     Label(app.checking ? "检测中" : "自检", systemImage: "checkmark.seal.fill")
                         .labelStyle(TintedIconLabelStyle(color: selfCheckTint))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 // 任何状态都能点：代理运行时跑完整连通性检测，未启动时预检

@@ -1,4 +1,5 @@
 import Foundation
+import Network
 
 /// 启动后的连通性自检。
 ///
@@ -151,115 +152,187 @@ enum SelfCheck {
 
     /// 预检（代理未启动时手动触发）：不依赖本地 SOCKS 端口，直接测配置里的
     /// 服务端 / DoH 是否可达，人工确认这套配置在启动前"能不能用"。
-    /// 隧道实际连的是 优选IP(有则用)/服务地址 : 服务端口；ECH 公钥要靠 DoH 查。
     static func runPreflight(config: ServerConfig) async -> [Result] {
         var results: [Result] = []
 
-        let dialHost = ServerConfig.cleanHost(config.ip.isEmpty ? config.server : config.ip)
-        if dialHost.isEmpty {
-            results.append(Result(title: "服务端地址", ok: false, note: "未填写服务地址或优选IP/域名"))
-        } else {
-            let (ok, cost, note) = await tcpCheck(host: dialHost, port: config.serverPort, timeout: 4)
-            results.append(Result(
-                title: "服务端 \(dialHost):\(config.serverPort)",
-                ok: ok,
-                note: ok ? String(format: "%.0f 毫秒", cost * 1000)
-                         : "失败：\(note)（请检查服务地址/优选IP/域名是否填对）"))
+        // 服务器地址以配置里的 server 为准（如 ech-cf.xxk.dpdns.org）：
+        // 根路径 banner 和 Token 握手都必须连它才有意义；
+        // 优选 IP 只是加速用的出口，不是被测对象。
+        let serverHost = ServerConfig.cleanHost(config.server)
+        if serverHost.isEmpty {
+            results.append(Result(title: "服务器地址", ok: false, note: "未填写服务地址或优选IP/域名"))
+            return results
         }
 
-        // DoH 才走 TCP；UDP DNS 没有可测的 TCP 连接
-        if let host = dohHost(config.dns) {
-            let (ok, cost, note) = await tcpCheck(host: host, port: 443, timeout: 4)
-            results.append(Result(
-                title: "DoH 服务器 \(host)",
-                ok: ok,
-                note: ok ? String(format: "%.0f 毫秒", cost * 1000) : "失败：\(note)"))
-        } else {
-            results.append(Result(title: "DoH 服务器", ok: true, note: "UDP DNS 模式，无需预检"))
+        // 1) 服务器地址：根路径应回 "WebSocket Proxy Server"。
+        let (bannerOK, bannerNote) = await serverBannerCheck(
+            host: serverHost, port: config.serverPort, timeout: 4)
+        results.append(Result(title: "服务器地址", ok: bannerOK, note: bannerNote))
+
+        // 2) Token 鉴权：真实带 token 发一次 WebSocket 升级请求。
+        //    服务端回 101/200 = token 正确；401 = 客户端与服务端不一致。
+        if bannerOK {
+            let (wsOK, wsNote) = await tokenHandshakeCheck(
+                host: serverHost, port: config.serverPort, token: config.token, timeout: 4)
+            results.append(Result(title: "Token鉴权", ok: wsOK, note: wsNote))
         }
 
         return results
     }
 
-    /// 从 dns 配置里取出 DoH 的 host。只有 https:// 形式的 DoH 有 TCP 可测；
-    /// UDP DNS（纯 IP/域名，不带路径）返回 nil。
-    static func dohHost(_ raw: String) -> String? {
-        let s = ServerConfig.normalizedDoH(raw)
-        let lower = s.lowercased()
-        guard lower.hasPrefix("https://") || lower.hasPrefix("http://") else { return nil }
-        return URL(string: s)?.host
-    }
-
-    /// TCP 连通性检测（异步，不占主线程）
-    private static func tcpCheck(host: String, port: Int, timeout: TimeInterval) async -> (Bool, TimeInterval, String) {
-        let start = Date()
-        let (ok, note) = await Task.detached(priority: .userInitiated) {
-            Self.blockingTCPConnect(host: host, port: port, timeout: timeout)
-        }.value
-        return (ok, Date().timeIntervalSince(start), note)
-    }
-
-    private static func blockingTCPConnect(host: String, port: Int, timeout: TimeInterval) -> (Bool, String) {
-        var hints = addrinfo()
-        hints.ai_family = AF_UNSPEC
-        hints.ai_socktype = SOCK_STREAM
-        var res: UnsafeMutablePointer<addrinfo>?
-        guard getaddrinfo(host, String(port), &hints, &res) == 0, let addrs = res else {
-            if res != nil { freeaddrinfo(res) }
-            return (false, "域名解析失败")
+    /// 请求服务端根路径，验证返回的是标准 Worker 标识 "WebSocket Proxy Server"。
+    /// 用 URLSession 发普通 HTTP GET（不带 Upgrade），系统代理不参与本次探测。
+    private static func serverBannerCheck(
+        host: String, port: Int, timeout: TimeInterval
+    ) async -> (Bool, String) {
+        guard let url = URL(string: "https://\(host):\(port)/") else {
+            return (false, "地址无效")
         }
-        defer { freeaddrinfo(addrs) }
-
-        // 先试 IPv4 再试 IPv6，和内核 v1.1.8 的 IPv4 优先一致：
-        // IPv6 路由不通的网络里，不会卡在 IPv6 上浪费时间。
-        var lastNote = "无可用地址"
-        for family in [AF_INET, AF_INET6] {
-            let r = tryConnect(addrs, family: family, timeout: timeout)
-            if r.ok { return (true, "已连通") }
-            if r.tried { lastNote = r.note }
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.timeoutIntervalForRequest = timeout
+        cfg.timeoutIntervalForResource = timeout
+        cfg.connectionProxyDictionary = [:]   // 空字典 = 不走系统代理，直连
+        let session = URLSession(configuration: cfg)
+        do {
+            let (data, resp) = try await session.data(from: url)
+            let body = String(decoding: data, as: UTF8.self)
+            if body.contains("WebSocket Proxy Server") {
+                return (true, "WebSocket Proxy Server")
+            }
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            return (false, "返回异常内容（HTTP \(code)）")
+        } catch {
+            return (false, "连接失败：请检查服务地址/优选IP/域名")
         }
-        return (false, lastNote)
     }
 
-    /// 尝试某个地址族的所有地址。返回 (是否连通, 是否真的试过, 失败原因)。
-    private static func tryConnect(_ addrs: UnsafeMutablePointer<addrinfo>,
-                                   family: Int32, timeout: TimeInterval) -> (ok: Bool, tried: Bool, note: String) {
-        var cur: UnsafeMutablePointer<addrinfo>? = addrs
-        var tried = false
-        var note = "连接失败"
-        while let n = cur {
-            if n.pointee.ai_family == family {
-                tried = true
-                let fd = socket(n.pointee.ai_family, n.pointee.ai_socktype, n.pointee.ai_protocol)
-                if fd >= 0 {
-                    let flags = fcntl(fd, F_GETFL)
-                    _ = fcntl(fd, F_SETFL, flags | O_NONBLOCK)
-                    let rc = connect(fd, n.pointee.ai_addr, n.pointee.ai_addrlen)
-                    if rc == 0 { close(fd); return (true, true, "已连通") }
-                    if errno == EINPROGRESS {
-                        // 等 socket 可写 = 连接完成。用 poll 而非 select：
-                        // FD_ZERO/FD_SET 是 C 宏，Swift 里没有，poll 是纯函数。
-                        var pfd = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
-                        let sel = poll(&pfd, 1, Int32(timeout * 1000))
-                        if sel > 0, pfd.revents & Int16(POLLOUT) != 0 {
-                            var soerr: Int32 = 0
-                            var len = socklen_t(MemoryLayout<Int32>.size)
-                            getsockopt(fd, SOL_SOCKET, SO_ERROR, &soerr, &len)
-                            if soerr == 0 { close(fd); return (true, true, "已连通") }
-                            note = String(cString: strerror(soerr))
-                        } else if sel == 0 {
-                            note = "连接超时"
-                        } else {
-                            note = "连接失败"
-                        }
-                    } else {
-                        note = String(cString: strerror(errno))
-                    }
-                    close(fd)
+    /// 做一次最小 WebSocket 升级握手，验证客户端与服务端 Token 是否一致。
+    /// 客户端没配 Token 也照样握手（不带 Sec-WebSocket-Protocol 头）：
+    /// 服务端同样为空则返回 101/200 = 一致；服务端配了 Token 则返回 401 = 不一致。
+    /// 绝不能"没配就跳过" —— 跳过就漏掉了"服务端有 Token 而客户端为空"的不一致。
+    /// 返回 (是否一致, 说明)。用 Network 框架（NWConnection）而非 URLSession，
+    /// 因为 URLSession 没有暴露升级握手后的状态码；手写 HTTP 升级请求可控性最好。
+    private static func tokenHandshakeCheck(
+        host: String, port: Int, token: String, timeout: TimeInterval
+    ) async -> (Bool, String) {
+        let protocolHeader = token.isEmpty ? "" : "Sec-WebSocket-Protocol: \(token)\r\n"
+        let request =
+            "GET / HTTP/1.1\r\n" +
+            "Host: \(host)\r\n" +
+            "Upgrade: websocket\r\n" +
+            "Connection: Upgrade\r\n" +
+            "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n" +
+            "Sec-WebSocket-Version: 13\r\n" +
+            protocolHeader +
+            "\r\n"
+
+        return await withCheckedContinuation { cont in
+            // 防重复 resume：超时回调、状态失败、响应回调可能并发到达，
+            // withCheckedContinuation 只能 resume 一次，多 resume 会崩溃。
+            final class Done: @unchecked Sendable {
+                let lock = NSLock()
+                var fired = false
+                func once(_ action: () -> Void) -> Bool {
+                    lock.lock()
+                    defer { lock.unlock() }
+                    if fired { return false }
+                    fired = true
+                    action()
+                    return true
                 }
             }
-            cur = n.pointee.ai_next
+            let done = Done()
+            // 必须走 TLS：443 端口是 HTTPS，裸 TCP 发明文 HTTP 会被 TLS 层拒掉，
+            // 握手永远拿不到状态行（表现为"无论 token 如何都判不一致"）。
+            // 服务端域名做 SNI，避免证书校验时主机名不匹配。
+            let tlsOptions = NWProtocolTLS.Options()
+            host.withCString {
+                sec_protocol_options_set_tls_server_name(tlsOptions.securityProtocolOptions, $0)
+            }
+            let conn = NWConnection(
+                host: NWEndpoint.Host(host),
+                port: NWEndpoint.Port(rawValue: UInt16(port))!,
+                using: NWParameters(tls: tlsOptions, tcp: NWProtocolTCP.Options()))
+            let receivedLock = NSLock()
+            var received = Data()
+            let readHead: (Data) -> (Bool, String)? = { chunk in
+                receivedLock.lock()
+                received.append(chunk)
+                let head = String(decoding: received, as: UTF8.self)
+                receivedLock.unlock()
+                // 兼容 HTTP/1.x 与 HTTP/2 两种状态行格式，提取三位状态码。
+                // 状态行如 "HTTP/1.1 101 Switching Protocols" / "HTTP/2 401 Unauthorized"。
+                let parts = head.split(separator: " ")
+                guard parts.count >= 2, parts[0].hasPrefix("HTTP/"), let code = Int(parts[1]) else {
+                    if head.contains("\r\n\r\n") || head.contains("\n\n") {
+                        return (false, "客户端与服务端不一致")
+                    }
+                    return nil
+                }
+                if code == 401 || code == 403 {
+                    return (false, "与服务端TOKEN不一致")
+                }
+                if code == 200 || code == 101 {
+                    return (true, "服务端验证通过")
+                }
+                if head.contains("\r\n\r\n") || head.contains("\n\n") {
+                    return (false, "客户端与服务端不一致")
+                }
+                return nil
+            }
+            let deadline = DispatchTime.now() + timeout
+
+            conn.stateUpdateHandler = { state in
+                switch state {
+                case .failed(let err):
+                    _ = done.once { cont.resume(returning: (false, "连接失败：\(err.localizedDescription)")) }
+                    conn.cancel()
+                case .ready:
+                    conn.send(content: request.data(using: .utf8), completion: .contentProcessed { _ in })
+                default:
+                    break
+                }
+            }
+
+            conn.receive(minimumIncompleteLength: 1, maximumLength: 4096) { data, _, _, err in
+                if let data, !data.isEmpty {
+                    if let verdict = readHead(data) {
+                        _ = done.once {
+                            conn.cancel()
+                            cont.resume(returning: verdict)
+                        }
+                    } else {
+                        conn.receive(minimumIncompleteLength: 1, maximumLength: 4096) { d2, _, _, e2 in
+                            if let d2, !d2.isEmpty {
+                                if let verdict = readHead(d2) {
+                                    _ = done.once {
+                                        conn.cancel()
+                                        cont.resume(returning: verdict)
+                                    }
+                                    return
+                                }
+                            }
+                            _ = done.once {
+                                conn.cancel()
+                                cont.resume(returning: (false, "客户端与服务端不一致"))
+                            }
+                        }
+                    }
+                } else if let err {
+                    _ = done.once {
+                        conn.cancel()
+                        cont.resume(returning: (false, "读取响应失败：\(err.localizedDescription)"))
+                    }
+                }
+            }
+
+            conn.start(queue: .global(qos: .userInitiated))
+            DispatchQueue.global().asyncAfter(deadline: deadline) {
+                _ = done.once {
+                    conn.cancel()
+                    cont.resume(returning: (false, "握手超时"))
+                }
+            }
         }
-        return (false, tried, note)
     }
 }

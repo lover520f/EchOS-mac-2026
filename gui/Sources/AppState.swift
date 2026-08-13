@@ -687,12 +687,11 @@ final class AppState: NSObject, ObservableObject {
                 return
             }
 
-            // 2) 端口就绪 → 立即标记运行中并接管系统代理
+            // 2) 端口就绪 → 标记运行中。系统代理先不接管：
+            //    自检通过前不对外暴露代理状态（菜单栏不变蓝），
+            //    避免"隧道其实不通却已把浏览器流量导入"的假成功。
             self.isRunning = true
-            self.log("[系统] 代理端口已就绪，正在接管系统代理…")
-            if self.config.autoSystemProxy {
-                self.enableSystemProxy()
-            }
+            self.log("[系统] 代理端口已就绪，正在自检…")
 
             // 3) 后台跑连通性探针，只更新自检状态
             Task { @MainActor in
@@ -704,18 +703,25 @@ final class AppState: NSObject, ObservableObject {
                 if failed.isEmpty {
                     let detail = results.map { "\($0.title)：\($0.note)" }.joined(separator: "\n")
                     self.checkState = .ok(detail)
+                    // 自检通过才算真正接管：接管成功 → proxyReady=true → 菜单栏变蓝
+                    self.log("[系统] 自检通过，正在接管系统代理…")
+                    if self.config.autoSystemProxy {
+                        self.enableSystemProxy()
+                    }
                 } else {
                     let detail = failed.map { "\($0.title)：\($0.note)" }.joined(separator: "\n")
                     self.checkState = .failed(detail)
                     self.log("[系统] 隧道自检未完全通过，请查看上方运行日志")
-                    // 端口就绪就接管了系统代理，但探针现在发现隧道其实不通——
-                    // 这时候让浏览器继续走这个"死隧道"，用户只会看到所有网页打不开。
-                    // 把系统代理回滚回去（还原用户原本的设置），并明确告诉他为什么。
+                    // 探针发现隧道其实不通：让浏览器继续走这个"死隧道"，
+                    // 用户只会看到所有网页打不开。此时代理是坏的状态，
+                    // 必须彻底关闭（停内核 + 还原系统代理 + 清状态），
+                    // 不能只撤系统代理留着内核跑 —— 否则下次启动会撞端口占用，
+                    // 界面状态（灯/按钮）也和真实情况对不上。
                     // 只信"必须经隧道"的探针（国外站点）：国内直连/本地端口的失败
-                    // 可能只是网络本身的问题，隧道未必坏了，不能因为它就撤代理。
+                    // 可能只是网络本身的问题，隧道未必坏了，不能因为它就关闭。
                     if self.proxyTakenOver, failed.contains(where: { $0.dependsOnTunnel }) {
-                        self.log("[系统] 探针失败，为避免浏览器全挂，已还原系统代理设置")
-                        self.disableSystemProxy()
+                        self.log("[系统] 隧道自检失败，为避免浏览器全挂，正在关闭代理…")
+                        await self.stop()
                     }
                 }
             }
@@ -887,6 +893,10 @@ final class AppState: NSObject, ObservableObject {
             // 摘要里带上延迟，一眼能看出快慢
             let detail = results.map { "\($0.title)：\($0.note)" }.joined(separator: "\n")
             checkState = .ok(detail)
+            // 手动自检：结果统一弹窗，不依赖用户切去查日志。
+            if !silent {
+                notify(detail, title: "自检通过")
+            }
             // 静默模式（启动后自动跑的那次）：通过的结果也进自检记录，
             // 只记失败的话，看不出平时延迟是多少，也就没法判断"今天怎么变慢了"。
             if silent {
@@ -897,6 +907,10 @@ final class AppState: NSObject, ObservableObject {
         } else {
             let detail = failed.map { "\($0.title)：\($0.note)" }.joined(separator: "\n")
             checkState = .failed(detail)
+            // 手动自检失败：统一弹窗点明哪几项没过。
+            if !silent {
+                notify(detail, title: "自检未通过")
+            }
             // 静默模式下失败无论如何都记一笔，而且要带上原因 ——
             // 只写"某项未通过"等于没说，用户照样不知道该查什么。
             if silent {
@@ -1319,6 +1333,9 @@ final class AppState: NSObject, ObservableObject {
     func shutdown() {
         // 退出前快照代理运行状态：下次启动（含自动更新重启）据此自动恢复
         UserDefaults.standard.set(isRunning, forKey: Self.proxyWasRunningKey)
+        // 退出前清掉自检结论：新一轮启动会重新自检，残留的失败态不该
+        // 在下次启动时继续影响状态灯/恢复逻辑。
+        checkState = .idle
         if proxyTakenOver { SystemProxy.restore() }
         process?.terminationHandler = nil
         process?.terminate()
@@ -1704,4 +1721,3 @@ final class AppState: NSObject, ObservableObject {
         }
     }
 }
-

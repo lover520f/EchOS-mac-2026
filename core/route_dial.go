@@ -137,8 +137,11 @@ func detectServerProtocol() {
 		log.Printf("[协议] 服务端类型: 简易 WebSocket 代理（每连接一条 WebSocket）")
 		return
 	}
-	serverProtocol.Store(protoSmux)
-	log.Printf("[协议] 服务端类型: x-tunnel（smux 多路复用）")
+	// 探测没判出来（超时/链路慢）时按 simple 处理：本项目服务端（Worker-ECH.js）
+	// 就是简易协议，simple 池对它是天然正确的；反观 smux 池对 simple 服务端
+	// 会因服务端不认 smux 帧而黑洞。探测失败默认 smux 只会把可用链路拖死。
+	serverProtocol.Store(protoSimple)
+	log.Printf("[协议] 服务端类型探测未果，按简易 WebSocket 代理处理（并发池走 simple）")
 }
 
 func dialViaTunnel(target string) (*outbound, error) {
