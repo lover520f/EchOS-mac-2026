@@ -71,9 +71,15 @@ async function handleSession(webSocket) {
   const pumpRemoteToWebSocket = async () => {
     // 攒满一整帧再发：把小块聚合成 ~32KB 再 send，出站帧数能砍掉 5~10 倍。
     // Cloudflare 免费版 Worker 对持续大流量转发按 CPU/帧数限额，帧越少越扛得住。
+    // 但「只攒满才发」在慢速流上是陷阱：YouTube 这类流每次 read 只有几 KB，
+    // 攒满 32KB 要等 1s+，播放器感知过高延迟会把码率压到最低档（表现为 ~200K）。
+    // 所以加 FLUSH_TIMEOUT_MS 双阈值：高速流攒满整帧省帧数，慢速流到点就发，
+    // 保证任何速率下发送延迟都不超过一条流的晚逝上限。
     const FLUSH_SIZE = 32 * 1024;
+    const FLUSH_TIMEOUT_MS = 100;
     const chunks = [];
     let total = 0;
+    let since = Date.now();
     const flush = () => {
       if (total === 0) return;
       const merged = new Uint8Array(total);
@@ -84,6 +90,7 @@ async function handleSession(webSocket) {
       }
       chunks.length = 0;
       total = 0;
+      since = Date.now();
       if (webSocket.readyState === WS_READY_STATE_OPEN) {
         webSocket.send(merged.buffer);
       }
@@ -96,7 +103,7 @@ async function handleSession(webSocket) {
         if (value?.byteLength > 0) {
           chunks.push(value);
           total += value.byteLength;
-          if (total >= FLUSH_SIZE) flush();
+          if (total >= FLUSH_SIZE || Date.now() - since >= FLUSH_TIMEOUT_MS) flush();
         }
       }
     } catch {}
