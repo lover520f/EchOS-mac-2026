@@ -399,7 +399,11 @@ func main() {
 		// 那几条通道只会每两秒 ping 一次然后超时，白占连接还刷屏。
 		detectServerProtocol()
 		if serverProtocol.Load() == protoSimple {
-			startSimpleWarmPool(connectionNum * 3)
+			// 简易协议走直连模式：不启动预热池。预热 filler 会持续并发握手
+			// 填池，这些连接业务用不上，却和真实新连接抢 ECH 查询/握手/CF 配额，
+			// 实测拖累多连接大流量（YouTube）的吞吐。ech-wk 同为"每连新建"无池，
+			// 速度稳定更高。dialSimpleWS 已完全绕过池，这里不再拉起 filler。
+			log.Printf("[连接池] 简易协议直连模式：不预热，每次新建 WebSocket")
 		} else {
 			echPool.Start()
 			echPool.WaitForChannelReady(10 * time.Second)
@@ -1035,10 +1039,29 @@ func getECHList() ([]byte, error) {
 	return echList, nil
 }
 
-func buildTLSConfigWithECH(serverName string, echList []byte) (*tls.Config, error) {
+// 系统根证书池只加载一次：macOS 上 SystemCertPool 每次调用都要读文件、
+// 解析数百张证书，YouTube 几十条并发连接若每条都重复加载，握手阶段显著拖慢
+// "起始吞吐爬坡"。证书池在进程内是只读共享的，全局缓存安全。
+var cachedRootPool = func() *x509.CertPool {
 	roots, err := x509.SystemCertPool()
 	if err != nil {
-		return nil, err
+		return nil
+	}
+	return roots
+}()
+
+// TLS 会话缓存：同一服务端的多条连接共享，复用 TLS 1.3 会话票证，
+// 免去每条连接完整的握手往返，多连接场景（YouTube 等）建立更快。
+var tlsSessionCache = tls.NewLRUClientSessionCache(64)
+
+func buildTLSConfigWithECH(serverName string, echList []byte) (*tls.Config, error) {
+	roots := cachedRootPool
+	if roots == nil {
+		var err error
+		roots, err = x509.SystemCertPool()
+		if err != nil {
+			return nil, err
+		}
 	}
 	return &tls.Config{
 		MinVersion:                     tls.VersionTLS13,
@@ -1047,19 +1070,25 @@ func buildTLSConfigWithECH(serverName string, echList []byte) (*tls.Config, erro
 		EncryptedClientHelloRejectionVerify: func(cs tls.ConnectionState) error {
 			return errors.New("服务器拒绝 ECH")
 		},
-		RootCAs: roots,
+		RootCAs:            roots,
+		ClientSessionCache: tlsSessionCache,
 	}, nil
 }
 
 func buildStandardTLSConfig(serverName string) (*tls.Config, error) {
-	roots, err := x509.SystemCertPool()
-	if err != nil {
-		return nil, err
+	roots := cachedRootPool
+	if roots == nil {
+		var err error
+		roots, err = x509.SystemCertPool()
+		if err != nil {
+			return nil, err
+		}
 	}
 	return &tls.Config{
 		MinVersion:         tls.VersionTLS13,
 		ServerName:         serverName,
 		RootCAs:            roots,
+		ClientSessionCache: tlsSessionCache,
 		InsecureSkipVerify: insecure, // 修正：fallback/标准TLS也要支持 -insecure
 	}, nil
 }
@@ -2941,9 +2970,7 @@ func handleHTTP(c net.Conn, cfgp *ProxyConfig) {
 
 	var first []byte
 
-	if req.Method == "CONNECT" {
-		_, _ = c.Write([]byte("HTTP/1.1 200 连接已建立\r\n\r\n"))
-	} else {
+	if req.Method != "CONNECT" {
 		req.RequestURI = ""
 		req.URL.Scheme = ""
 		req.URL.Host = ""
@@ -2955,12 +2982,35 @@ func handleHTTP(c net.Conn, cfgp *ProxyConfig) {
 	// Mac 版改动：出站前先过一遍分流规则
 	ob, err := dialTargetWithRoute(target)
 	if err != nil {
+		// CONNECT 隧道失败不能回 200（浏览器会以为通了开始发 TLS 数据，
+		// 而隧道根本没建起来）—— 必须回 502 让浏览器走重试/报错。
+		if req.Method == "CONNECT" {
+			_, _ = c.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\n"))
+		}
 		return
+	}
+
+	// CONNECT 在隧道建好（CONNECTED）后才回 200：浏览器收到 200 时隧道
+	// 已经能收数据，首包不会因为"先回 200 后建隧道"的空窗期而超时。
+	if req.Method == "CONNECT" {
+		_, _ = c.Write([]byte("HTTP/1.1 200 连接已建立\r\n\r\n"))
 	}
 	if len(first) > 0 {
 		if _, err := ob.rw.Write(first); err != nil {
 			_ = ob.rw.Close()
 			return
+		}
+	}
+	// bufio 可能已预读了后续字节（个别客户端不等 200 就发数据）。
+	// 这些字节不能丢，否则隧道看似通、TLS 握手却永远完不成：
+	// 把它们作为首帧一并喂给隧道。
+	if br.Buffered() > 0 {
+		buffered, _ := br.Peek(br.Buffered())
+		if len(buffered) > 0 {
+			if _, err := ob.rw.Write(buffered); err != nil {
+				_ = ob.rw.Close()
+				return
+			}
 		}
 	}
 	logRouteEvent(c, "HTTP", target, ob, true)

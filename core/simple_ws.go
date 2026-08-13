@@ -149,29 +149,20 @@ func (p *ECHPool) pickIP() string {
 
 // dialSimpleWS 为一个目标地址开一条新的 WebSocket 并完成 CONNECT 握手。
 func dialSimpleWS(target string) (net.Conn, error) {
-	// 先用预热连接。失败很可能是这条连接已经被服务端悄悄关掉了 ——
-	// 这种情况换一条全新的重试就能成，不该让用户看到一次失败。
-	c, err := dialSimpleWSTimeout(target, simpleConnectTimeout, true)
-	if err == nil {
-		return c, nil
-	}
-	return dialSimpleWSTimeout(target, simpleConnectTimeout, false)
+	// 直连模式：每次新建 WebSocket（与 ech-wk 客户端行为一致）。
+	// 预热池（含 dialGate 并发闸门）在 CF 简易服务端下既可能发出
+	// "已被服务端悄悄关掉的死连接"，又会把并发握手限死在 6 条 ——
+	// YouTube 这种多连接大流量一上来就被卡在并发闸门上，吞吐上不去。
+	return dialSimpleWSTimeout(target, simpleConnectTimeout)
 }
 
-func dialSimpleWSTimeout(target string, timeout time.Duration, usePool bool) (net.Conn, error) {
+func dialSimpleWSTimeout(target string, timeout time.Duration) (net.Conn, error) {
 	if echPool == nil {
 		return nil, errors.New("连接池未初始化")
 	}
 
-	var ws *websocket.Conn
-	var err error
-	if usePool && warmPool != nil {
-		ws, err = warmPool.take()
-	} else if warmPool != nil {
-		ws, err = warmPool.dial()
-	} else {
-		ws, err = echPool.dialWebSocketWithECH(echPool.wsServerAddr, 2, echPool.pickIP(), "", 0)
-	}
+	// 完全绕过预热池与并发闸门，每次全新建连（ech-wk 等价路径）。
+	ws, err := echPool.dialWebSocketWithECH(echPool.wsServerAddr, 2, echPool.pickIP(), "", 0)
 	if err != nil {
 		return nil, err
 	}
@@ -275,128 +266,3 @@ func probeSimpleProtocol() bool {
 	return text == "CONNECTED" || strings.HasPrefix(text, "ERROR:")
 }
 
-// ======================== 连接预热池 ========================
-//
-// 简易协议一个 WebSocket 只能服务一条 TCP 连接，而每条新 WebSocket 都要重做
-// 一次 TLS + ECH 握手 —— 实测约 2 秒。浏览器打开一个页面要几十条连接，
-// 全部现建就会卡到没法用。
-//
-// 所以后台常备一批"已握手、还没发 CONNECT"的空闲连接，用的时候直接发
-// CONNECT 就能开始传数据，把那 2 秒握手从关键路径上挪走。
-
-// warmConn 记下连接是什么时候建的。
-// Cloudflare 会悄悄关掉空闲太久的 WebSocket，而客户端在下次写数据前
-// 察觉不到 —— 拿一条死连接发 CONNECT，只能干等到超时。所以宁可提前丢弃。
-type warmConn struct {
-	ws   *websocket.Conn
-	born time.Time
-}
-
-// 预热连接的保质期。服务端空闲超时通常在一分钟上下，留足余量。
-const warmConnTTL = 20 * time.Second
-
-type simpleWarmPool struct {
-	idle chan *warmConn
-	size int
-	stop chan struct{}
-	// dialGate 限制"同时进行中的 TLS+ECH 握手"数量。
-	// 不限流的话，浏览器打开一个页面并发几十条连接，会瞬间引发几十个
-	// 并发握手：CPU 和服务端两头都扛不住，实测并发 20 就整个卡死。
-	dialGate chan struct{}
-}
-
-var warmPool *simpleWarmPool
-
-// 并发握手上限。太小则池子补得慢，太大则重演雪崩，6 是实测比较稳的值。
-const maxConcurrentDial = 6
-
-func startSimpleWarmPool(size int) {
-	if size < 8 {
-		size = 8
-	}
-	if size > 48 {
-		size = 48
-	}
-	p := &simpleWarmPool{
-		idle:     make(chan *warmConn, size),
-		size:     size,
-		stop:     make(chan struct{}),
-		dialGate: make(chan struct{}, maxConcurrentDial),
-	}
-	warmPool = p
-
-	// 补充协程的数量就等于允许的并发握手数，多了也没用（会被 dialGate 挡住）
-	for i := 0; i < maxConcurrentDial; i++ {
-		go p.filler()
-	}
-	log.Printf("[连接池] 已启动，常备 %d 条预热连接（并发握手上限 %d）", size, maxConcurrentDial)
-}
-
-// dial 在限流闸门内建立一条新的 WebSocket
-func (p *simpleWarmPool) dial() (*websocket.Conn, error) {
-	select {
-	case p.dialGate <- struct{}{}:
-		defer func() { <-p.dialGate }()
-	case <-p.stop:
-		return nil, errors.New("连接池已停止")
-	}
-	return echPool.dialWebSocketWithECH(echPool.wsServerAddr, 1, echPool.pickIP(), "", 0)
-}
-
-func (p *simpleWarmPool) filler() {
-	for {
-		select {
-		case <-p.stop:
-			return
-		default:
-		}
-		ws, err := p.dial()
-		if err != nil {
-			time.Sleep(500 * time.Millisecond)
-			continue
-		}
-		select {
-		case p.idle <- &warmConn{ws: ws, born: time.Now()}:
-		case <-p.stop:
-			_ = ws.Close()
-			return
-		}
-	}
-}
-
-// take 取一条预热连接。
-// 池空时优先等补充协程干活，而不是自己上去凑热闹再加一个并发握手 ——
-// 排队等一条已经握完手的连接，比自己从头握一次快得多。
-func (p *simpleWarmPool) take() (*websocket.Conn, error) {
-	// 先把池里过期的清掉，拿到第一条还新鲜的
-	for {
-		select {
-		case wc := <-p.idle:
-			if time.Since(wc.born) < warmConnTTL {
-				return wc.ws, nil
-			}
-			_ = wc.ws.Close()   // 过期，丢掉继续找
-			continue
-		default:
-		}
-		break
-	}
-
-	timer := time.NewTimer(3 * time.Second)
-	defer timer.Stop()
-	for {
-		select {
-		case wc := <-p.idle:
-			if time.Since(wc.born) < warmConnTTL {
-				return wc.ws, nil
-			}
-			_ = wc.ws.Close()
-			continue
-		case <-timer.C:
-			// 等太久说明池子供不上，只好自己建（同样受 dialGate 限流）
-			return p.dial()
-		case <-p.stop:
-			return nil, errors.New("连接池已停止")
-		}
-	}
-}

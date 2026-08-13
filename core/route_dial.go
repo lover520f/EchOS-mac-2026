@@ -24,17 +24,6 @@ import (
 
 var routeReady atomic.Bool
 
-// proxyRejectedHosts 记录服务端最近拒绝过的目标主机，值是拒绝发生的时间。
-//
-// 早先这里是永久记录的：当时服务端连不上任何 Cloudflare 站点，那个结论
-// 在整个会话里都成立。换用带 ProxyIP 中转的服务端之后前提变了 ——
-// 失败往往只是一次偶发抖动，再永久记着就会让一个本该走代理的站点
-// 从此一直直连，而且用户完全看不出为什么。所以改成短期记忆。
-var proxyRejectedHosts sync.Map
-
-// 拒绝记录的有效期。只用来削掉连续重试的开销，不做长期判断。
-const proxyRejectTTL = 60 * time.Second
-
 // initLocalRouting 在非 TUN 模式下初始化分流。全局模式（-default all）不需要
 // 加载 geo 数据，省下几百毫秒启动时间和几十 MB 内存。
 func initLocalRouting() {
@@ -150,51 +139,14 @@ func dialViaTunnel(target string) (*outbound, error) {
 	}
 
 	if serverProtocol.Load() == protoSimple {
-		host, _, _ := net.SplitHostPort(target)
-
-		// 服务端拒过的站点直接走直连，别每次都白等它拒绝一遍。
-		//
-		// Cloudflare Worker 连不上托管在 Cloudflare 上的站点（平台限制，
-		// NAT64 绕行也被同一条规则挡住，实测无解）。这类站点每次都要先
-		// 花好几秒等服务端说"不行"，纯属浪费。记住一次就够了。
-		// 全局模式除外：那种模式下用户要的就是"绝不直连"。
-		if defaultRouteDecision != DecisionAll && host != "" {
-			if v, ok := proxyRejectedHosts.Load(host); ok {
-				if at, _ := v.(time.Time); time.Since(at) < proxyRejectTTL {
-					if direct, e := net.DialTimeout("tcp", target, 5*time.Second); e == nil {
-						return &outbound{rw: direct, direct: true}, nil
-					}
-				} else {
-					proxyRejectedHosts.Delete(host) // 过期了，重新给代理一次机会
-				}
-			}
-		}
-
 		c, err := dialSimpleWS(target)
 		if err == nil {
 			return &outbound{rw: c}, nil
 		}
-		if host != "" {
-			proxyRejectedHosts.Store(host, time.Now())
-		}
-		// Cloudflare Worker 的 connect() 不允许连回 Cloudflare 自家 IP 段，
-		// 所以任何托管在 CF 上的站点（ip.sb、claude.ai 等）都会被服务端拒绝。
-		// 这是平台限制，客户端绕不过去。
-		//
-		// 全局模式下**绝不能**偷偷改走直连：用户选"全局"就是要求所有流量都过代理，
-		// 悄悄直连等于让他在毫不知情的情况下暴露真实 IP。这种时候宁可失败。
-		if defaultRouteDecision == DecisionAll {
-			log.Printf("[分流] %s 服务端拒绝(%v)", target, err)
-			log.Printf("[分流] 全局模式下不会改走直连；该站点托管在 Cloudflare 上，"+
-				"而 Cloudflare Worker 不允许连回自家网络")
-			return nil, err
-		}
-
-		// 非全局模式本来就允许直连，退回去再试一次比直接报错有用。
-		if direct, e := net.DialTimeout("tcp", target, 5*time.Second); e == nil {
-			log.Printf("[分流] %s 经服务端失败，已改走直连", target)
-			return &outbound{rw: direct, direct: true}, nil
-		}
+		// 严格遵循分流模式：该站点按规则走隧道，隧道失败就如实失败，
+		// 绝不自动改走直连（否则"绕过大陆"下会悄悄直连国外站、暴露真实 IP，
+		// 也会破坏用户对流量的预期）。
+		log.Printf("[分流] %s 经隧道失败(%v)，按分流模式如实返回错误", target, err)
 		return nil, err
 	}
 
