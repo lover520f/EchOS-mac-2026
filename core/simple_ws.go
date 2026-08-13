@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"strings"
 	"sync"
@@ -47,14 +46,6 @@ type simpleWSConn struct {
 	closed   atomic.Bool
 	closeErr error
 
-	// readData 标记这条隧道是否收到过服务端返回的任何真实数据。
-	// wroteAt 记录客户端第一次发数据的时刻。
-	// 黑洞检测依据：客户端已经发过数据（wroteAt != 0）、服务端却一直没回
-	// （readData 仍 false），超过时限即判定服务端"假成功"黑洞（如 Worker
-	// 兼容日期不对）—— 握手通了但出站数据根本不转发。只看"双方任一向有数据"
-	// 不够：客户端自己会发数据（Write），那样黑洞就漏判了。
-	readData atomic.Bool
-	wroteAt  atomic.Int64
 }
 
 func (c *simpleWSConn) Read(p []byte) (int, error) {
@@ -89,13 +80,9 @@ func (c *simpleWSConn) Read(p []byte) (int, error) {
 		if errors.Is(err, io.EOF) {
 			c.reader = nil
 			if n > 0 {
-				c.readData.Store(true)
 				return n, nil
 			}
 			continue
-		}
-		if n > 0 {
-			c.readData.Store(true)
 		}
 		return n, err
 	}
@@ -108,9 +95,6 @@ func (c *simpleWSConn) Write(p []byte) (int, error) {
 	// 不能用文本 DATA: 前缀 —— 那条路径会经过 TextEncoder，二进制数据会被 UTF-8 改写。
 	if err := c.ws.WriteMessage(websocket.BinaryMessage, p); err != nil {
 		return 0, err
-	}
-	if c.wroteAt.Load() == 0 {
-		c.wroteAt.Store(time.Now().UnixNano())
 	}
 	return len(p), nil
 }
@@ -192,40 +176,13 @@ func dialSimpleWSTimeout(target string, timeout time.Duration) (net.Conn, error)
 		case text == "CONNECTED":
 			_ = ws.SetReadDeadline(time.Time{})
 			_ = ws.SetWriteDeadline(time.Time{})
-			conn := &simpleWSConn{ws: ws}
-			go watchNoDataTimeout(conn, target)
-			return conn, nil
+			return &simpleWSConn{ws: ws}, nil
 		case strings.HasPrefix(text, "ERROR:"):
 			_ = ws.Close()
 			return nil, fmt.Errorf("服务端拒绝: %s", strings.TrimPrefix(text, "ERROR:"))
 		case text == "CLOSE":
 			_ = ws.Close()
 			return nil, errors.New("服务端主动关闭")
-		}
-	}
-}
-
-// watchNoDataTimeout 兜底"假成功"隧道：客户端已发过数据（wroteAt != 0）、
-// 服务端却一直没回（readData 仍 false），超过时限即判定黑洞（出站数据被堵 /
-// Worker 兼容日期不对），主动断开，免得连接在 relayOutbound 的 io.Copy 里
-// 永久挂起。客户端还没发数据的空闲连接不受影响；正常连接服务端毫秒级就有
-// 回应（TLS 握手），一旦收到过数据本函数立即退出。
-func watchNoDataTimeout(c *simpleWSConn, target string) {
-	const noDataTimeout = 8 * time.Second
-	ticker := time.NewTicker(500 * time.Millisecond)
-	defer ticker.Stop()
-	for range ticker.C {
-		if c.closed.Load() || c.readData.Load() {
-			return
-		}
-		wrote := c.wroteAt.Load()
-		if wrote == 0 {
-			continue
-		}
-		if time.Since(time.Unix(0, wrote)) > noDataTimeout {
-			log.Printf("[隧道] %s 已发数据但 %.0f 秒内服务端从未返回，疑似服务端黑洞，已断开（可检查 Worker 兼容日期是否 ≥ 2025-09-15）", target, noDataTimeout.Seconds())
-			_ = c.ws.Close()
-			return
 		}
 	}
 }
@@ -265,4 +222,3 @@ func probeSimpleProtocol() bool {
 	// 只是那个目标它连不上而已 —— 两者都足以判定这是简易 WebSocket 代理。
 	return text == "CONNECTED" || strings.HasPrefix(text, "ERROR:")
 }
-

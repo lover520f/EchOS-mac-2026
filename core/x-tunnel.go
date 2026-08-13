@@ -111,7 +111,7 @@ var cfg = GlobalConfig{
 	WSHandshakeTimeout: 5 * time.Second,
 	ReconnectDelay:     1 * time.Second,
 	RTTProbeTimeout:    2 * time.Second,
-	ReadBuf:            64 * 1024,
+	ReadBuf:            256 * 1024,
 }
 
 // logDNSDiag 控制 DNS 诊断日志。默认关闭：这些行会以每秒几十条的速度刷屏，

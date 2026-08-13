@@ -161,12 +161,14 @@ func dialViaTunnel(target string) (*outbound, error) {
 // 区别只是出站端放宽成了 io.ReadWriteCloser，好让直连的 net.Conn 也能走这里。
 func relayOutbound(c net.Conn, ob *outbound) {
 	done := make(chan struct{}, 2)
+	// 转发缓冲放大到 256KB：io.Copy 默认 32KB，大流量下系统调用太频繁，
+	// 放大后一次搬更多字节，吞吐更稳（与 WS 读写缓冲 256KB 对齐）。
 	go func() {
-		_, _ = io.Copy(ob.rw, c)
+		_, _ = io.CopyBuffer(ob.rw, c, make([]byte, 256*1024))
 		done <- struct{}{}
 	}()
 	go func() {
-		_, _ = io.Copy(c, ob.rw)
+		_, _ = io.CopyBuffer(c, ob.rw, make([]byte, 256*1024))
 		done <- struct{}{}
 	}()
 	<-done
